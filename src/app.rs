@@ -11,7 +11,7 @@ pub enum Phase {
 }
 
 pub struct App {
-    pub target: &'static [u8],
+    pub target: [u8; WORD_LEN],
     pub history: [([u8; WORD_LEN], [LetterState; WORD_LEN]); MAX_GUESSES],
     pub input_idx: usize,
     pub input_len: usize,
@@ -62,7 +62,7 @@ impl App {
             return;
         }
 
-        self.history[self.input_idx].1 = game::check(self.target, guess);
+        self.history[self.input_idx].1 = game::check(&self.target, guess);
         self.input_idx += 1;
         self.input_len = 0;
         self.message = None;
@@ -70,7 +70,7 @@ impl App {
         let mut word = [0u8; WORD_LEN];
         word.copy_from_slice(guess);
 
-        if &word[..] == self.target {
+        if word == self.target {
             self.phase = Phase::Won;
             self.controls = END_CONTROLS;
             self.message = Some(format!("Found in {} guesses. {}", self.input_idx, match self.input_idx {
@@ -85,7 +85,7 @@ impl App {
         } else if self.input_idx >= game::MAX_GUESSES {
             self.phase = Phase::Lost;
             self.controls = END_CONTROLS;
-            let word = str::from_utf8(self.target).map(|str| str.to_ascii_uppercase());
+            let word = str::from_utf8(&self.target).map(|str| str.to_ascii_uppercase());
             self.message = Some(format!(
                 "The word was {}.",
                 word.unwrap_or_else(|_| "?????".to_string())
@@ -98,7 +98,7 @@ impl App {
 mod tests {
     use super::*;
 
-    fn app_with_target(target: &'static [u8]) -> App {
+    fn app_with_target(target: [u8; WORD_LEN]) -> App {
         App {
             target,
             history: [([0; WORD_LEN], [LetterState::WrongSpot; WORD_LEN]); MAX_GUESSES],
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn invalid_word_sets_message_and_does_not_consume_a_guess() {
-        let mut app = app_with_target(b"crane");
+        let mut app = app_with_target(*b"crane");
         type_word(&mut app, "zzzzz");
         app.submit();
 
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn valid_wrong_word_advances_without_winning() {
-        let mut app = app_with_target(b"crane");
+        let mut app = app_with_target(*b"crane");
         type_word(&mut app, "slate");
         app.submit();
 
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn matching_word_wins() {
-        let mut app = app_with_target(b"crane");
+        let mut app = app_with_target(*b"crane");
         type_word(&mut app, "crane");
         app.submit();
 
@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn max_wrong_guesses_loses() {
-        let mut app = app_with_target(b"crane");
+        let mut app = app_with_target(*b"crane");
         for _ in 0..game::MAX_GUESSES {
             type_word(&mut app, "slate");
             app.submit();
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn backspace_removes_last_typed_char() {
-        let mut app = app_with_target(b"crane");
+        let mut app = app_with_target(*b"crane");
         type_word(&mut app, "cra");
         app.backspace();
 

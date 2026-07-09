@@ -40,10 +40,37 @@ fn check_disjoint(answers: &[String], valid: &[String]) {
     }
 }
 
+// Each 5-letter word is a base-26 integer (< 26^5 = 11_881_376). The sorted list is
+// stored as LEB128 gaps between consecutive words (first word absolute), which is much
+// denser than 3 fixed bytes since typical gaps fit in 1-2 varint bytes. Decoded once at
+// startup back into a sorted Vec<u32> for binary search.
+fn pack(w: &str) -> u32 {
+    let mut v: u32 = 0;
+    for &c in w.as_bytes() {
+        v = v * 26 + (c - b'a') as u32;
+    }
+    v
+}
+
+fn push_varint(buf: &mut Vec<u8>, mut v: u32) {
+    loop {
+        let byte = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            buf.push(byte);
+            break;
+        }
+        buf.push(byte | 0x80);
+    }
+}
+
 fn write_packed(words: &[String], path: &Path) {
-    let mut buf = Vec::with_capacity(words.len() * WORD_LEN);
-    for w in words {
-        buf.extend_from_slice(w.as_bytes());
+    let mut buf = Vec::with_capacity(words.len() * 2);
+    let mut prev = 0u32;
+    for (i, w) in words.iter().enumerate() {
+        let v = pack(w);
+        push_varint(&mut buf, if i == 0 { v } else { v - prev });
+        prev = v;
     }
     fs::write(path, buf).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
 }

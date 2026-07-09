@@ -1,2 +1,35 @@
+# Build-size configuration.
+#
+# Three sizes depending on the toolchain used — with NO source changes between them:
+#
+#   cargo build --release
+#       -> ~214 KB. STABLE toolchain. The [unstable] table below is silently ignored
+#          by stable cargo, so std is not recompiled.
+#
+#   cargo +nightly build --release
+#       -> ~157 KB. build-std recompiles std with the release profile (opt-level=z, LTO),
+#          which strips ~57 KB of dead std code. The program is STRICTLY identical
+#          (the panic hook still restores the terminal).
+#
+#   RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort -Clink-arg=/OPT:ICF" cargo +nightly build --release
+#       -> ~125 KB. Additionally turns panics into an immediate abort: removes all the
+#          panic/backtrace/format machinery. Only visible effect: on a panic (a bug), the
+#          terminal is not restored. The game itself is unchanged. (RUSTFLAGS overrides the
+#          [target] rustflags below, so /OPT:ICF is repeated here to keep it.)
+#
+# Nightly prerequisite: rustup toolchain install nightly --component rust-src
+#
+# The binary lands in target/x86_64-pc-windows-msvc/release/wordle_tui.exe (build-std
+# requires an explicit target; we pin it here so the commands above work without --target).
+# To get the classic target/release/ path back on stable, drop the `target` line below and
+# add --target to the nightly build.
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[build]
+target = "x86_64-pc-windows-msvc"
+
+# /OPT:ICF folds identical functions at link time (size optimization).
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "link-arg=/OPT:ICF"]

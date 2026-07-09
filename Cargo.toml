@@ -11,6 +11,10 @@ strip = true
 panic = "abort"
 overflow-checks = false
 
+[features]
+# Enables the ratatui-based reference-snapshot generator (test-only).
+ratatui-ref = ["dep:ratatui"]
+
 [dependencies]
-crossterm = "0.29.0"
-ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+crossterm = { version = "0.29.0", default-features = false, features = ["windows", "events"] }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"], optional = true }

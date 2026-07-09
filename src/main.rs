@@ -2,44 +2,59 @@ use std::io::{self, Stdout};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
+    self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
 };
-use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
+use crossterm::{cursor, execute, queue};
 
 mod app;
 mod game;
 mod ui;
 
+#[cfg(test)]
+mod snapshot_tests;
+
+#[cfg(feature = "ratatui-ref")]
+mod ui_ref;
+
 use app::{App, Phase};
 
-type Term = Terminal<CrosstermBackend<Stdout>>;
-
-fn init_terminal() -> io::Result<Term> {
+fn init_terminal() -> io::Result<Stdout> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, SetTitle("Wordle"))?;
-    Terminal::new(CrosstermBackend::new(stdout))
+    execute!(stdout, EnterAlternateScreen, SetTitle("Wordle"), cursor::Hide)?;
+    Ok(stdout)
 }
 
 fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    let _ = execute!(io::stdout(), cursor::Show, LeaveAlternateScreen);
 }
 
-fn run(terminal: &mut Term) -> io::Result<()> {
+fn run(out: &mut Stdout) -> io::Result<()> {
     let mut app = App::new();
+    let mut last_size = (0u16, 0u16);
+    let mut dirty = true;
 
     loop {
-        terminal.draw(|frame| ui::draw(frame, &app))?;
+        let size = terminal::size()?;
+        if size != last_size {
+            queue!(out, terminal::Clear(terminal::ClearType::All))?;
+            last_size = size;
+            dirty = true;
+        }
+        if dirty {
+            let grid = ui::build_grid(size.0 as usize, size.1 as usize, &app);
+            ui::render(out, &grid)?;
+            dirty = false;
+        }
 
         if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
+                dirty = true;
 
                 match app.phase {
                     Phase::Playing => match key.code {
@@ -69,15 +84,15 @@ fn run(terminal: &mut Term) -> io::Result<()> {
     Ok(())
 }
 
-fn main() -> io::Result<()> {
+fn main() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal();
         default_hook(info);
     }));
 
-    let mut terminal = init_terminal()?;
-    let result = run(&mut terminal);
-    restore_terminal();
-    result
+    if let Ok(mut terminal) = init_terminal() {
+        let _ = run(&mut terminal);
+        restore_terminal();
+    }
 }
