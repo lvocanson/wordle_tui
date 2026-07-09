@@ -12,13 +12,20 @@ const BOARD_H: usize = MAX_GUESSES * (CELL_H + 1) - 1; // 23
 
 const KEYBOARD_ROWS: [&str; 3] = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
 const KEY_W: usize = 3;
-const KB_W: usize = 10 * (KEY_W + 1) - 1; // 39, widest row (10 keys, 1-col gaps)
+const KB_COLS: usize = 10; // keys in the widest row
 const KEY_H: usize = 1;
 const KB_H: usize = KEYBOARD_ROWS.len() * (KEY_H + 1) - 1; // 5, 3 rows with 1-row gaps
 
 const TITLE_H: usize = 1;
 const FOOTER_H: usize = 2;
 const REQ_VERT: usize = TITLE_H + BOARD_H + KB_H + FOOTER_H; // 31
+
+// Clickable-region action codes stored in the hit map (0 = nothing). Letter keys
+// register their own lowercase byte (b'a'..=b'z'), which never collides with these.
+pub const ACT_BACK: u8 = 1;
+pub const ACT_ENTER: u8 = 2;
+const BTN_W: usize = 5; // full ENTER / BACK buttons flanking the bottom row
+const BTN_W_MIN: usize = 3; // degraded (E) / (B) buttons
 
 // Preferred startup terminal size (cols, rows): the vertical layout plus a
 // 1-row gap between each of the 4 categories (SpaceBetween spreads +3 evenly).
@@ -40,6 +47,7 @@ pub struct Grid {
     fg: Vec<Color>,
     bg: Vec<Color>,
     bold: Vec<bool>,
+    hit: Vec<u8>,
 }
 
 impl Grid {
@@ -51,6 +59,28 @@ impl Grid {
             fg: vec![Color::Reset; w * h],
             bg: vec![Color::Reset; w * h],
             bold: vec![false; w * h],
+            hit: vec![0u8; w * h],
+        }
+    }
+
+    // Tag a rectangle of cells with a click action for later hit-testing.
+    fn hit_rect(&mut self, x: usize, y: usize, w: usize, h: usize, action: u8) {
+        for dy in 0..h {
+            for dx in 0..w {
+                let (px, py) = (x + dx, y + dy);
+                if px < self.w && py < self.h {
+                    self.hit[py * self.w + px] = action;
+                }
+            }
+        }
+    }
+
+    // Action registered at a screen cell, or 0 if none (out-of-bounds included).
+    pub fn hit_test(&self, x: usize, y: usize) -> u8 {
+        if x < self.w && y < self.h {
+            self.hit[y * self.w + x]
+        } else {
+            0
         }
     }
 
@@ -98,27 +128,19 @@ fn center(outer: usize, inner: usize) -> usize {
     }
 }
 
-// SpaceBetween placement of `n` equal items of size `s` within `len`.
-// Returns (start, size) pairs. Degrades gracefully when the items don't fit.
-fn stack(n: usize, s: usize, len: usize) -> [(usize, usize); MAX_GUESSES] {
-    let mut out = [(0usize, 0usize); MAX_GUESSES];
-    if len >= n * s {
-        let g = gaps(n, len - n * s);
-        let mut pos = 0;
-        for i in 0..n {
-            out[i] = (pos, s);
-            pos += s + g[i];
-        }
-    } else {
-        // Squeezed: split available length as evenly as possible, no gaps.
-        let mut pos = 0;
-        for i in 0..n {
-            let sz = rnd((i + 1) * len, n) - rnd(i * len, n);
-            out[i] = (pos, sz);
-            pos += sz;
-        }
+// Horizontal budget shared by board and keyboard, priority interior > gaps > center:
+// `n` cells of full width `full` (odd) in available `w`. The cell width degrades from
+// `full` down to 1 in steps of 2 (staying odd so the glyph keeps centered) as space
+// shrinks; the inter-cell gap (lower priority) only appears once cells are full width.
+// Returns (per-cell width, gap 0/1, offset centering the whole block).
+fn col_budget(w: usize, n: usize, full: usize) -> (usize, usize, usize) {
+    let mut cell = full;
+    while cell > 1 && n * cell > w {
+        cell -= 2;
     }
-    out
+    let gap = (w >= n * full + (n - 1)) as usize;
+    let content = n * cell + (n - 1) * gap;
+    (cell, gap, center(w, content))
 }
 
 // SpaceBetween placement of items with individual `sizes` within `len` (title/kb/footer).
@@ -244,19 +266,15 @@ fn draw_footer(grid: &mut Grid, app: &App, x: usize, y: usize, w: usize, h: usiz
     }
 }
 
-fn draw_board(grid: &mut Grid, app: &App, rx: usize, ry: usize, rw: usize, rh: usize) {
-    let inner_w = rw.min(BOARD_W);
-    let inner_h = rh.min(BOARD_H);
-    let bx = rx + center(rw, BOARD_W);
-    let by = ry + center(rh, BOARD_H);
-
-    let rows = stack(MAX_GUESSES, CELL_H, inner_h);
-    let cols = stack(WORD_LEN, CELL_W, inner_w);
+// Vertical geometry (cell height `cell_h`, row gap `vgap`, y position) comes from the
+// caller's budget; columns follow the shared `col_budget` (interior > gaps > center).
+fn draw_board(grid: &mut Grid, app: &App, by: usize, w: usize, cell_h: usize, vgap: usize) {
+    let (cell_w, hgap, bx) = col_budget(w, WORD_LEN, CELL_W);
 
     for word_idx in 0..MAX_GUESSES {
-        let (rs, rhh) = rows[word_idx];
+        let ry = by + word_idx * (cell_h + vgap);
         for cell_idx in 0..WORD_LEN {
-            let (cs, cw) = cols[cell_idx];
+            let cx = bx + cell_idx * (cell_w + hgap);
             let (letter, status) = if word_idx < app.input_idx {
                 let (word, result) = &app.history[word_idx];
                 (word[cell_idx], CellColor::Submitted(result[cell_idx]))
@@ -268,7 +286,7 @@ fn draw_board(grid: &mut Grid, app: &App, rx: usize, ry: usize, rw: usize, rh: u
             } else {
                 (0u8, CellColor::Empty)
             };
-            draw_cell(grid, bx + cs, by + rs, cw, rhh, letter, status);
+            draw_cell(grid, cx, ry, cell_w, cell_h, letter, status);
         }
     }
 }
@@ -296,56 +314,119 @@ fn better_state(a: LetterState, b: LetterState) -> LetterState {
     }
 }
 
-fn draw_keyboard(grid: &mut Grid, app: &App, rx: usize, ry: usize, rw: usize, rh: usize) {
+// Draw one keyboard row of letters starting at (x, y), registering each key as clickable.
+fn draw_keys(
+    grid: &mut Grid,
+    states: &[Option<LetterState>; 26],
+    row: &str,
+    x: usize,
+    y: usize,
+    key_w: usize,
+    hgap: usize,
+) {
+    for (j, letter) in row.bytes().enumerate() {
+        let color = match states[(letter - b'a') as usize] {
+            Some(state) => CellColor::Submitted(state),
+            None => CellColor::Keyboard,
+        };
+        let key_x = x + j * (key_w + hgap);
+        draw_cell(grid, key_x, y, key_w, 1, letter, color);
+        grid.hit_rect(key_x, y, key_w, 1, letter);
+    }
+}
+
+fn draw_keyboard(grid: &mut Grid, app: &App, ky: usize, w: usize, vgap: usize) {
     let states = keyboard_letter_states(app);
-    let kw = rw.min(KB_W);
-    let kh = rh.min(KB_H);
-    let kx = rx + center(rw, KB_W);
-    let ky = ry + center(rh, KB_H);
+    let (key_w, hgap, _) = col_budget(w, KB_COLS, KEY_W);
+
+    let last = KEYBOARD_ROWS.len() - 1;
+    let bottom = KEYBOARD_ROWS[last];
+    let letters_w = bottom.len() * key_w + (bottom.len() - 1) * hgap;
+
+    // ENTER / BACK flank the bottom row. Keep the full 5-wide labels while the cells are
+    // at full width, otherwise fall back to the 3-wide (E)/(B) — always shown, even if
+    // that overflows a very narrow terminal. `sep` matches the inter-key gap.
+    let sep = hgap;
+    let bw = if key_w == KEY_W && 2 * BTN_W + 2 * sep + letters_w <= w {
+        BTN_W
+    } else {
+        BTN_W_MIN
+    };
+    let bottom_w = 2 * bw + 2 * sep + letters_w;
+
+    // Width the keyboard on the widest of the top row and the button-inclusive bottom row.
+    let top_w = KB_COLS * key_w + (KB_COLS - 1) * hgap;
+    let kb_w = top_w.max(bottom_w);
+    let kx = center(w, kb_w);
 
     for (row_idx, row) in KEYBOARD_ROWS.iter().enumerate() {
-        if row_idx * (KEY_H + 1) >= kh {
-            break;
-        }
-        let n = row.len();
-        let before = center(kw, n * (KEY_W + 1) - 1);
-        for (j, letter) in row.bytes().enumerate() {
-            let idx = (letter - b'a') as usize;
-            let color = match states[idx] {
-                Some(state) => CellColor::Submitted(state),
-                None => CellColor::Keyboard,
+        let row_y = ky + row_idx * (KEY_H + vgap);
+        if row_idx == last {
+            let start = kx + center(kb_w, bottom_w);
+            let (enter, back): (&[u8], &[u8]) = if bw == BTN_W {
+                (b"ENTER", b"BACK")
+            } else {
+                (b"(E)", b"(B)")
             };
-            draw_cell(
+            draw_button(grid, start, row_y, bw, enter, ACT_ENTER);
+            let letters_x = start + bw + sep;
+            draw_keys(grid, &states, row, letters_x, row_y, key_w, hgap);
+            draw_button(grid, letters_x + letters_w + sep, row_y, bw, back, ACT_BACK);
+        } else {
+            let row_w = row.len() * key_w + (row.len() - 1) * hgap;
+            draw_keys(
                 grid,
-                kx + before + j * (KEY_W + 1),
-                ky + row_idx * (KEY_H + 1),
-                KEY_W,
-                1,
-                letter,
-                color,
+                &states,
+                row,
+                kx + center(kb_w, row_w),
+                row_y,
+                key_w,
+                hgap,
             );
         }
     }
 }
 
-// Split a keyboard column (horizontal layout) into title / keyboard / footer rows.
-fn keyboard_column(grid: &mut Grid, app: &App, rx: usize, ry: usize, rw: usize, rh: usize) {
-    let a = rh.min(BOARD_H);
-    let area_y = ry + center(rh, BOARD_H);
-    let mut starts = [0usize; 3];
-    stack_sizes(&[TITLE_H, KB_H, FOOTER_H], a, &mut starts);
-    draw_title(grid, rx, area_y + starts[0], rw);
-    draw_keyboard(grid, app, rx, area_y + starts[1], rw, KB_H);
-    draw_footer(grid, app, rx, area_y + starts[2], rw, FOOTER_H);
+// A grey labelled button that also registers its whole area as clickable.
+fn draw_button(grid: &mut Grid, x: usize, y: usize, w: usize, label: &[u8], action: u8) {
+    let bg = cell_bg_color(&CellColor::Keyboard);
+    for dx in 0..w {
+        grid.set(x + dx, y, b' ', bg, bg, false);
+    }
+    let off = w.saturating_sub(label.len()) / 2;
+    grid.text(x + off, y, label, Color::White, bg, false);
+    grid.hit_rect(x, y, w, 1, action);
 }
 
 // ----------------------------------------------------------------------------
 // Top-level layout
 // ----------------------------------------------------------------------------
 
+// Enum-free section tags for the vertical stack (title/board/keyboard/footer).
+const S_TITLE: u8 = 0;
+const S_BOARD: u8 = 1;
+const S_KEYBOARD: u8 = 2;
+const S_FOOTER: u8 = 3;
+
 pub fn build_grid(w: usize, h: usize, app: &App) -> Grid {
     let mut grid = Grid::new(w, h);
 
+    // Priority-driven vertical budget. Each feature is enabled (high priority
+    // first) only while the running total of rows it needs still fits in `h`;
+    // the leftover is spread as gaps between sections (lowest priority). Column
+    // widths are handled separately and are not part of this budget.
+    //
+    //   prio  feature                              rows   cumulative
+    //   10    "too small" notice (w<5 or h<6)                fallback
+    //    9    board (6 word rows, 1 tall each)        6         6
+    //    8    footer, 1 line                          1         7
+    //    7    keyboard (3 key rows)                   3        10
+    //    6    footer, 2nd line (message + controls)   1        11
+    //    5    gaps between board rows                 5        16
+    //    4    cell inner padding (rows to CELL_H)    12        28
+    //    3    title                                   1        29
+    //    2    gaps between keyboard rows              2        31
+    //    1    gaps between the four sections         rest
     if w < MINI_W || h < MINI_H {
         // MINI_W=5, MINI_H=6 — hardcoded to avoid pulling in formatting machinery.
         const MSG: &[u8] = b"Terminal too small. Must be at least 5x6.";
@@ -353,25 +434,56 @@ pub fn build_grid(w: usize, h: usize, app: &App) -> Grid {
         return grid;
     }
 
-    if h >= REQ_VERT {
-        // Vertical: title / board / keyboard / footer stacked, extra as gaps.
-        let mut starts = [0usize; 4];
-        stack_sizes(&[TITLE_H, BOARD_H, KB_H, FOOTER_H], h, &mut starts);
-        draw_title(&mut grid, 0, starts[0], w);
-        draw_board(&mut grid, app, 0, starts[1], w, BOARD_H);
-        draw_keyboard(&mut grid, app, 0, starts[2], w, KB_H);
-        draw_footer(&mut grid, app, 0, starts[3], w, FOOTER_H);
+    let footer1 = h >= 7;
+    let keyboard = h >= 10;
+    let footer2 = h >= 11;
+    let board_gaps = h >= 16;
+    let cell_pad = h >= 28;
+    let title = h >= 29;
+    let kb_gaps = h >= 31;
+
+    let cell_h = if cell_pad { CELL_H } else { KEY_H };
+    let bgap = board_gaps as usize;
+    let board_h = MAX_GUESSES * cell_h + (MAX_GUESSES - 1) * bgap;
+
+    let kgap = kb_gaps as usize;
+    let kb_h = if keyboard {
+        KEYBOARD_ROWS.len() * KEY_H + (KEYBOARD_ROWS.len() - 1) * kgap
     } else {
-        // Horizontal: board left, keyboard column right (SpaceEvenly with Fill margins).
-        // Columns: Fill | Min(39) board | Max(23) gap | Length(39) keyboard | Fill.
-        let rem = w.saturating_sub(BOARD_W + KB_W); // leftover beyond the 69 fixed cols
-        let gap = rem.min(23); // Max(23) gap fills before the Fill margins
-        let left = rem - gap; // remainder split evenly into the two Fill margins
-        let c0 = (left + 1) / 2; // left margin (ceil)
-        let board_x = c0;
-        let kb_x = c0 + BOARD_W + gap;
-        draw_board(&mut grid, app, board_x, 0, BOARD_W, h);
-        keyboard_column(&mut grid, app, kb_x, 0, KB_W, h);
+        0
+    };
+
+    let title_h = title as usize;
+    let footer_h = footer1 as usize + footer2 as usize;
+
+    // Collect the present sections in top-to-bottom order, then let stack_sizes
+    // spread the remaining rows as gaps between them (Flex::SpaceBetween).
+    let mut tags = [0u8; 4];
+    let mut sizes = [0usize; 4];
+    let mut n = 0;
+    let mut push = |tag: u8, size: usize| {
+        if size > 0 {
+            tags[n] = tag;
+            sizes[n] = size;
+            n += 1;
+        }
+    };
+    push(S_TITLE, title_h);
+    push(S_BOARD, board_h);
+    push(S_KEYBOARD, kb_h);
+    push(S_FOOTER, footer_h);
+
+    let mut starts = [0usize; 4];
+    stack_sizes(&sizes[..n], h, &mut starts[..n]);
+
+    for i in 0..n {
+        let y = starts[i];
+        match tags[i] {
+            S_TITLE => draw_title(&mut grid, 0, y, w),
+            S_BOARD => draw_board(&mut grid, app, y, w, cell_h, bgap),
+            S_KEYBOARD => draw_keyboard(&mut grid, app, y, w, kgap),
+            _ => draw_footer(&mut grid, app, 0, y, w, footer_h),
+        }
     }
 
     grid
