@@ -1,83 +1,83 @@
-use std::io;
-use wordle_solver::*;
+use std::io::{self, Stdout};
+use std::time::Duration;
 
-fn main() {
-    let word_length = 5;
-    let max_guesses = 6;
-    let words_pool = include_str!("words_pool.txt");
-    let words_pool: Vec<&str> = words_pool
-        .split(|c: char| !c.is_alphabetic())
-        .collect();
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
+};
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
 
-    let words_dictionary = include_str!("words_dictionary.txt");
-    let words_dictionary: Vec<&str> = words_dictionary
-        .split(|c: char| !c.is_alphabetic())
-        .collect();
+mod app;
+mod game;
+mod ui;
 
-    let game = GameBuilder::new(word_length, max_guesses)
-        .add_words_to_pool(&words_pool)
-        .add_words_to_dictionary(&words_dictionary)
-        .build();
+use app::{App, Phase};
 
-    drop(words_pool);
-    drop(words_dictionary);
+type Term = Terminal<CrosstermBackend<Stdout>>;
 
-    let mut game = match game {
-        Ok(game) => game,
-        Err(e) => {
-            eprintln!("An error occurred while setting up the game: {e:?}");
-            return;
-        }
-    };
+fn init_terminal() -> io::Result<Term> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, SetTitle("Wordle"))?;
+    Terminal::new(CrosstermBackend::new(stdout))
+}
 
-    while matches!(game.state(), GameState::Playing) {
-        let (used, max) = game.guesses();
-        println!("({used}/{max}) Enter a {word_length} letter word:");
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(io::stdout(), LeaveAlternateScreen);
+}
 
-        let mut guess = String::new();
-        io::stdin()
-            .read_line(&mut guess)
-            .expect("Failed to read line");
+fn run(terminal: &mut Term) -> io::Result<()> {
+    let mut app = App::new();
 
-        let guess = guess.trim();
-        let result = game.guess(guess);
+    loop {
+        terminal.draw(|frame| ui::draw(frame, &app))?;
 
-        match result {
-            GuessResult::NotAllowed => {
-                println!("This word is not allowed. (Wrong size or not in the dictionary)");
-            }
-            GuessResult::Correct => {
-                print!("\x1b[42;1m");
-                guess.chars().for_each(|c| print!(" {c} "));
-                println!("\x1b[0m");
-            }
-            GuessResult::Incorrect(hints) => {
-                for (i, c) in guess.chars().enumerate() {
-                    let color_code = match hints[i] {
-                        CharHint::Correct => "\x1b[42;1m",
-                        CharHint::Misplaced => "\x1b[43;1m",
-                        CharHint::NotPresent => "\x1b[100;1m",
-                    };
-                    print!("{} {} \x1b[0m", color_code, c);
+        if event::poll(Duration::from_millis(200))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
                 }
-                println!();
+
+                match app.phase {
+                    Phase::Playing => match key.code {
+                        KeyCode::Esc => break,
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            break
+                        }
+                        KeyCode::Char(c) if c.is_ascii_alphabetic() => {
+                            app.type_letter(c.to_ascii_lowercase() as u8)
+                        }
+                        KeyCode::Backspace => app.backspace(),
+                        KeyCode::Enter => app.submit(),
+                        _ => {}
+                    },
+                    Phase::Won | Phase::Lost => match key.code {
+                        KeyCode::Enter | KeyCode::Char('r') | KeyCode::Char('R') => {
+                            app = App::new()
+                        }
+                        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => break,
+                        _ => {}
+                    },
+                }
             }
         }
     }
 
-    match game.state() {
-        GameState::Playing => panic!("Game ended to soon."),
-        GameState::Won => {
-            let (used, max) = game.guesses();
-            println!("Congrats! Found in {used}/{max} guesses.");
-        }
-        GameState::Lost => {
-            let answer = game.get_answer().expect("Unable to retrieve answer from lost game.");
-            println!("The word was {answer}.")
-        }
-    }
+    Ok(())
+}
 
-    println!("Press Enter to continue...");
-    let mut _s = String::new();
-    _ = io::stdin().read_line(&mut _s);
+fn main() -> io::Result<()> {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        default_hook(info);
+    }));
+
+    let mut terminal = init_terminal()?;
+    let result = run(&mut terminal);
+    restore_terminal();
+    result
 }
