@@ -59,7 +59,13 @@ fn make_app(
 /// (name, width, height, app)
 fn scenarios() -> Vec<(String, u16, u16, App)> {
     let g = [CorrectSpot; WORD_LEN];
-    let mixed = [CorrectSpot, NotInAnySpot, WrongSpot, NotInAnySpot, WrongSpot];
+    let mixed = [
+        CorrectSpot,
+        NotInAnySpot,
+        WrongSpot,
+        NotInAnySpot,
+        WrongSpot,
+    ];
     let all6 = [
         ("slate", mixed),
         ("slate", mixed),
@@ -103,7 +109,13 @@ fn scenarios() -> Vec<(String, u16, u16, App)> {
             "vertical_lost".into(),
             55,
             45,
-            make_app(b"crane", &all6, "", Phase::Lost, Some("The word was CRANE.")),
+            make_app(
+                b"crane",
+                &all6,
+                "",
+                Phase::Lost,
+                Some("The word was CRANE."),
+            ),
         ),
         (
             "vertical_tall".into(),
@@ -254,7 +266,16 @@ fn probe_layout() {
         .split(area);
         eprintln!(
             "w={w}: c0(x={},w={}) c1(x={},w={}) c2(x={},w={}) c3(x={},w={}) c4(x={},w={})",
-            r[0].x, r[0].width, r[1].x, r[1].width, r[2].x, r[2].width, r[3].x, r[3].width, r[4].x, r[4].width
+            r[0].x,
+            r[0].width,
+            r[1].x,
+            r[1].width,
+            r[2].x,
+            r[2].width,
+            r[3].x,
+            r[3].width,
+            r[4].x,
+            r[4].width
         );
     }
     eprintln!("== horizontal Fill split (odd leftover) ==");
@@ -269,7 +290,10 @@ fn probe_layout() {
         ])
         .flex(Flex::SpaceEvenly)
         .split(area);
-        eprintln!("w={w}: c0(x={},w={}) c4(x={},w={})", r[0].x, r[0].width, r[4].x, r[4].width);
+        eprintln!(
+            "w={w}: c0(x={},w={}) c4(x={},w={})",
+            r[0].x, r[0].width, r[4].x, r[4].width
+        );
     }
     eprintln!("== board rows: 6x Max3 SpaceBetween in height H ==");
     for h in [18u16, 19, 20, 21, 22, 23] {
@@ -282,9 +306,11 @@ fn probe_layout() {
     }
     eprintln!("== board internal: centered(Max39,Max23), then rows Max3 x6 SpaceBetween ==");
     for (w, h) in [(39u16, 23u16), (50, 30), (45, 25)] {
-        let area = Rect::new(0, 0, w, h)
-            .centered(Constraint::Max(39), Constraint::Max(23));
-        eprintln!("area {w}x{h} -> centered x={} y={} w={} h={}", area.x, area.y, area.width, area.height);
+        let area = Rect::new(0, 0, w, h).centered(Constraint::Max(39), Constraint::Max(23));
+        eprintln!(
+            "area {w}x{h} -> centered x={} y={} w={} h={}",
+            area.x, area.y, area.width, area.height
+        );
     }
     eprintln!("== keyboard row Center flex: Max3 x N in width 30 ==");
     for n in [7usize, 9, 10] {
@@ -292,7 +318,12 @@ fn probe_layout() {
         let r = Layout::horizontal(vec![Constraint::Max(3); n])
             .flex(Flex::Center)
             .split(area);
-        eprintln!("n={n}: first.x={} last.x={} w={}", r[0].x, r[n - 1].x, r[0].width);
+        eprintln!(
+            "n={n}: first.x={} last.x={} w={}",
+            r[0].x,
+            r[n - 1].x,
+            r[0].width
+        );
     }
 }
 

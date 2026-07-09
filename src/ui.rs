@@ -1,7 +1,3 @@
-//! Direct crossterm rendering — no ratatui. An in-memory `Grid` is filled to
-//! reproduce the exact same layout ratatui produced (verified cell-for-cell against
-//! reference snapshots in `snapshot_tests`), then flushed to the terminal.
-
 use std::io::Write;
 
 use crossterm::style::Color;
@@ -32,10 +28,6 @@ const MINI_H: usize = MAX_GUESSES; // 6
 
 // The too-small message hardcodes these dimensions; keep them in sync.
 const _: () = assert!(MINI_W == 5 && MINI_H == 6);
-
-// crossterm colors matching ratatui's crossterm backend conversion:
-// Green->DarkGreen, Yellow->DarkYellow, Red->DarkRed, Gray->Grey, DarkGray->DarkGrey.
-const BG: Color = Color::DarkGrey;
 
 // ----------------------------------------------------------------------------
 // Grid model
@@ -78,10 +70,6 @@ impl Grid {
         }
     }
 }
-
-// ----------------------------------------------------------------------------
-// Layout primitives — reproduce ratatui's cassowary integer rounding.
-// ----------------------------------------------------------------------------
 
 // round-half-up of a/b for non-negative integers.
 fn rnd(a: usize, b: usize) -> usize {
@@ -159,26 +147,52 @@ fn stack_sizes(sizes: &[usize], len: usize, out: &mut [usize]) {
 enum CellColor {
     Empty,
     Draft,
+    Keyboard,
     Submitted(LetterState),
 }
 
-fn cell_colors(c: &CellColor) -> (Color, Color) {
+fn cell_bg_color(c: &CellColor) -> Color {
     match c {
-        CellColor::Empty => (BG, BG),
-        CellColor::Draft => (BG, Color::White),
+        CellColor::Empty => Color::Rgb {
+            r: 18,
+            g: 18,
+            b: 19,
+        },
+        CellColor::Draft => Color::Rgb {
+            r: 18,
+            g: 18,
+            b: 19,
+        },
+        CellColor::Keyboard => Color::Rgb {
+            r: 129,
+            g: 131,
+            b: 132,
+        },
         CellColor::Submitted(s) => match s {
-            LetterState::CorrectSpot => (Color::DarkGreen, Color::White),
-            LetterState::WrongSpot => (Color::DarkYellow, Color::White),
-            LetterState::NotInAnySpot => (Color::Grey, Color::White),
+            LetterState::CorrectSpot => Color::Rgb {
+                r: 83,
+                g: 141,
+                b: 78,
+            },
+            LetterState::WrongSpot => Color::Rgb {
+                r: 181,
+                g: 159,
+                b: 59,
+            },
+            LetterState::NotInAnySpot => Color::Rgb {
+                r: 58,
+                g: 58,
+                b: 60,
+            },
         },
     }
 }
 
 fn draw_cell(grid: &mut Grid, x: usize, y: usize, w: usize, h: usize, letter: u8, c: CellColor) {
-    let (bg, fg) = cell_colors(&c);
+    let bg = cell_bg_color(&c);
     for dy in 0..h {
         for dx in 0..w {
-            grid.set(x + dx, y + dy, b' ', fg, bg, false);
+            grid.set(x + dx, y + dy, b' ', bg, bg, false);
         }
     }
     if letter != 0 && w > 0 && h > 0 {
@@ -186,7 +200,7 @@ fn draw_cell(grid: &mut Grid, x: usize, y: usize, w: usize, h: usize, letter: u8
             x + (w - 1) / 2,
             y + (h - 1) / 2,
             letter.to_ascii_uppercase(),
-            fg,
+            Color::White,
             bg,
             false,
         );
@@ -198,7 +212,7 @@ fn draw_cell(grid: &mut Grid, x: usize, y: usize, w: usize, h: usize, letter: u8
 // ----------------------------------------------------------------------------
 
 fn draw_title(grid: &mut Grid, x: usize, y: usize, w: usize) {
-    const T: &[u8] = b"WORDLE TUI";
+    const T: &[u8] = b"- Wordle -";
     let off = w.saturating_sub(T.len()) / 2; // Line::centered = (w-len)/2
     grid.text(x + off, y, T, Color::Reset, Color::Reset, true);
 }
@@ -209,16 +223,23 @@ fn draw_footer(grid: &mut Grid, app: &App, x: usize, y: usize, w: usize, h: usiz
     let put = |grid: &mut Grid, row: usize, s: &str, fg: Color| {
         let off = (w / 2).saturating_sub(s.len() / 2);
         let visible = s.len().min(w.saturating_sub(off));
-        grid.text(x + off, row, &s.as_bytes()[..visible], fg, Color::Reset, false);
+        grid.text(
+            x + off,
+            row,
+            &s.as_bytes()[..visible],
+            fg,
+            Color::Reset,
+            false,
+        );
     };
     if h >= FOOTER_H {
         put(grid, y, msg, Color::DarkRed);
-        put(grid, y + 1, app.controls, BG);
+        put(grid, y + 1, app.controls, Color::Reset);
     } else if h >= 1 {
         if app.message.is_some() {
             put(grid, y, msg, Color::DarkRed);
         } else {
-            put(grid, y, app.controls, BG);
+            put(grid, y, app.controls, Color::Reset);
         }
     }
 }
@@ -292,9 +313,17 @@ fn draw_keyboard(grid: &mut Grid, app: &App, rx: usize, ry: usize, rw: usize, rh
             let idx = (letter - b'a') as usize;
             let color = match states[idx] {
                 Some(state) => CellColor::Submitted(state),
-                None => CellColor::Draft,
+                None => CellColor::Keyboard,
             };
-            draw_cell(grid, kx + before + j * (KEY_W + 1), ky + row_idx * (KEY_H + 1), KEY_W, 1, letter, color);
+            draw_cell(
+                grid,
+                kx + before + j * (KEY_W + 1),
+                ky + row_idx * (KEY_H + 1),
+                KEY_W,
+                1,
+                letter,
+                color,
+            );
         }
     }
 }
@@ -354,8 +383,8 @@ pub fn build_grid(w: usize, h: usize, app: &App) -> Grid {
 
 pub fn render<W: Write>(out: &mut W, grid: &Grid) -> std::io::Result<()> {
     use crossterm::cursor::MoveTo;
-    use crossterm::style::{Attribute, SetAttribute, SetBackgroundColor, SetForegroundColor};
     use crossterm::queue;
+    use crossterm::style::{Attribute, SetAttribute, SetBackgroundColor, SetForegroundColor};
 
     for y in 0..grid.h {
         queue!(out, MoveTo(0, y as u16))?;
@@ -373,7 +402,11 @@ pub fn render<W: Write>(out: &mut W, grid: &Grid) -> std::io::Result<()> {
             }
             queue!(
                 out,
-                SetAttribute(if bold { Attribute::Bold } else { Attribute::Reset }),
+                SetAttribute(if bold {
+                    Attribute::Bold
+                } else {
+                    Attribute::Reset
+                }),
                 SetForegroundColor(fg),
                 SetBackgroundColor(bg)
             )?;

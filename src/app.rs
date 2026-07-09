@@ -1,7 +1,7 @@
 use crate::game::{self, LetterState, MAX_GUESSES, WORD_LEN};
 
 const PLAYING_CONTROLS: &str = "<Enter> Submit  <Esc> Quit";
-const END_CONTROLS: &str = "<R/Enter> Restart  <Q/Esc> Quit";
+const END_CONTROLS: &str = "<Enter> Restart <Esc> Quit";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Phase {
@@ -73,15 +73,19 @@ impl App {
         if word == self.target {
             self.phase = Phase::Won;
             self.controls = END_CONTROLS;
-            self.message = Some(format!("Found in {} guesses. {}", self.input_idx, match self.input_idx {
-                1 => "Genius!",
-                2 => "Magnificent!",
-                3 => "Impressive!",
-                4 => "Splendid!",
-                5 => "Great!",
-                game::MAX_GUESSES => "Phew!",
-                _ => "Good!",
-            }));
+            self.message = Some(format!(
+                "Found in {} guesses. {}",
+                self.input_idx,
+                match self.input_idx {
+                    1 => "Genius!",
+                    2 => "Magnificent!",
+                    3 => "Impressive!",
+                    4 => "Splendid!",
+                    5 => "Great!",
+                    game::MAX_GUESSES => "Phew!",
+                    _ => "Good!",
+                }
+            ));
         } else if self.input_idx >= game::MAX_GUESSES {
             self.phase = Phase::Lost;
             self.controls = END_CONTROLS;

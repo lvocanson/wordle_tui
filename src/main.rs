@@ -76,10 +76,8 @@ fn run(out: &mut Stdout) -> io::Result<()> {
                         _ => {}
                     },
                     Phase::Won | Phase::Lost => match key.code {
-                        KeyCode::Enter | KeyCode::Char('r') | KeyCode::Char('R') => {
-                            app = App::new()
-                        }
-                        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => break,
+                        KeyCode::Enter => app = App::new(),
+                        KeyCode::Esc => break,
                         _ => {}
                     },
                 }
