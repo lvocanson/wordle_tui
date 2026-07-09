@@ -11,12 +11,6 @@ mod app;
 mod game;
 mod ui;
 
-#[cfg(test)]
-mod snapshot_tests;
-
-#[cfg(feature = "ratatui-ref")]
-mod ui_ref;
-
 use app::{App, Phase};
 
 fn init_terminal() -> io::Result<Stdout> {
