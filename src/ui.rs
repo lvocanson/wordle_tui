@@ -16,14 +16,20 @@ const BOARD_H: usize = MAX_GUESSES * (CELL_H + 1) - 1; // 23
 
 const KEYBOARD_ROWS: [&str; 3] = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
 const KEY_W: usize = 3;
-const KB_W: usize = 30; // widest row (10 keys)
-const KB_H: usize = 3;
+const KB_W: usize = 10 * (KEY_W + 1) - 1; // 39, widest row (10 keys, 1-col gaps)
+const KEY_H: usize = 1;
+const KB_H: usize = KEYBOARD_ROWS.len() * (KEY_H + 1) - 1; // 5, 3 rows with 1-row gaps
 
 const TITLE_H: usize = 1;
 const FOOTER_H: usize = 2;
-const REQ_VERT: usize = TITLE_H + BOARD_H + KB_H + FOOTER_H; // 29
+const REQ_VERT: usize = TITLE_H + BOARD_H + KB_H + FOOTER_H; // 31
+
+// Preferred startup terminal size (cols, rows): the vertical layout plus a
+// 1-row gap between each of the 4 categories (SpaceBetween spreads +3 evenly).
+pub const PREFERRED_SIZE: (u16, u16) = (BOARD_W as u16, (REQ_VERT + 3) as u16);
 const MINI_W: usize = WORD_LEN; // 5
 const MINI_H: usize = MAX_GUESSES; // 6
+
 // The too-small message hardcodes these dimensions; keep them in sync.
 const _: () = assert!(MINI_W == 5 && MINI_H == 6);
 
@@ -277,18 +283,18 @@ fn draw_keyboard(grid: &mut Grid, app: &App, rx: usize, ry: usize, rw: usize, rh
     let ky = ry + center(rh, KB_H);
 
     for (row_idx, row) in KEYBOARD_ROWS.iter().enumerate() {
-        if row_idx >= kh {
+        if row_idx * (KEY_H + 1) >= kh {
             break;
         }
         let n = row.len();
-        let before = center(kw, n * KEY_W);
+        let before = center(kw, n * (KEY_W + 1) - 1);
         for (j, letter) in row.bytes().enumerate() {
             let idx = (letter - b'a') as usize;
             let color = match states[idx] {
                 Some(state) => CellColor::Submitted(state),
                 None => CellColor::Draft,
             };
-            draw_cell(grid, kx + before + j * KEY_W, ky + row_idx, KEY_W, 1, letter, color);
+            draw_cell(grid, kx + before + j * (KEY_W + 1), ky + row_idx * (KEY_H + 1), KEY_W, 1, letter, color);
         }
     }
 }
@@ -328,7 +334,7 @@ pub fn build_grid(w: usize, h: usize, app: &App) -> Grid {
         draw_footer(&mut grid, app, 0, starts[3], w, FOOTER_H);
     } else {
         // Horizontal: board left, keyboard column right (SpaceEvenly with Fill margins).
-        // Columns: Fill | Min(39) board | Max(23) gap | Length(30) keyboard | Fill.
+        // Columns: Fill | Min(39) board | Max(23) gap | Length(39) keyboard | Fill.
         let rem = w.saturating_sub(BOARD_W + KB_W); // leftover beyond the 69 fixed cols
         let gap = rem.min(23); // Max(23) gap fills before the Fill margins
         let left = rem - gap; // remainder split evenly into the two Fill margins

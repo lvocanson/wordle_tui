@@ -22,7 +22,13 @@ use app::{App, Phase};
 fn init_terminal() -> io::Result<Stdout> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, SetTitle("Wordle"), cursor::Hide)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        terminal::SetSize(ui::PREFERRED_SIZE.0, ui::PREFERRED_SIZE.1),
+        SetTitle("Wordle"),
+        cursor::Hide
+    )?;
     Ok(stdout)
 }
 
