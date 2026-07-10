@@ -16,7 +16,9 @@
 #
 # Going further, `-Cpanic=immediate-abort` turns every panic (bounds-checks included) into a
 # bare abort, shedding the last ~3 KB of panic-message formatting. But then hooks no longer
-# run, so the terminal is NOT restored on a bug-panic — not worth 3 KB. To try it:
+# run, so the terminal is NOT restored on a bug-panic — but a hand audit shows no panic is
+# reachable with an intact binary (see OPTIMIZATION.md "immediate-abort safety"), so that risk is
+# theoretical. To try it:
 #   RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort -Clink-arg=/OPT:ICF" cargo +nightly build --release
 #
 # Nightly prerequisite: rustup toolchain install nightly --component rust-src

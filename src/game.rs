@@ -108,6 +108,10 @@ pub fn pick_target(seed: u64) -> [u8; WORD_LEN] {
         }
         prev = Some(w);
     }
+    // Reachable ONLY if `union.bin` is corrupt: with intact data the stream holds exactly
+    // ANSWER_COUNT colour-A words (guaranteed by the encoder, checked by `union_round_trips`),
+    // so `seen` hits `idx < ANSWER_COUNT` before the loop ends and we return above. Under
+    // immediate-abort this compiles to a bare abort. See OPTIMIZATION.md "immediate-abort safety".
     unreachable!("colour-A words number ANSWER_COUNT, so idx is always reached")
 }
 

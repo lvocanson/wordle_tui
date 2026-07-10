@@ -101,6 +101,11 @@ impl<'a> RangeDecoder<'a> {
     }
 
     // Returns a cumulative-frequency point in 0..tot to be looked up in the model.
+    // Both divisions below panic ONLY on a corrupt `union.bin`: `tot` is always > 0 with intact
+    // data (every caller feeds a total whose add-one smoothing floors it at >= 1; `char_tot`'s
+    // `lo` can reach 26 — an empty, zero total — only if a word's first differing char exceeds
+    // 'z', which the sort forbids), and `range >= TOP` is held by the renorm loops while every
+    // `tot <= WORD_COUNT < TOP`, so `range / tot >= 1`. See OPTIMIZATION.md "immediate-abort safety".
     pub fn decode_freq(&mut self, tot: u32) -> u32 {
         self.range /= tot;
         let dv = self.code / self.range;

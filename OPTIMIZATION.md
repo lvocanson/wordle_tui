@@ -133,6 +133,53 @@ that immediate-abort bypasses the hook mechanism, so `restore_terminal` never ru
 terminal is left dirty on a bug-panic. That trade — 30 KB vs. a clean screen after a crash — is
 the user's call; the default here keeps the safe build.
 
+### immediate-abort safety (manual panic audit)
+
+The catch above — a dirty terminal on panic — only bites if a panic is actually *reachable*.
+It is not. Every runtime panic site was traced by hand (release profile has
+`overflow-checks = false`, so integer overflow/underflow **wraps** and is not itself a panic;
+the only panic families left are out-of-bounds index/slice, divide-by-zero, `copy_from_slice`
+length mismatch, and explicit panics). The audit's verdict: **no panic is reachable while the
+embedded `union.bin` is intact**, so under immediate-abort the dirty-terminal case is purely
+theoretical (it would require a corrupted binary, at which point terminal state is moot).
+
+**Locally guaranteed** (no external assumption):
+
+- **`Grid` rendering (`ui.rs`)** — every write/read goes through `set`/`text`/`hit_rect`/
+  `hit_test`, all guarded by `px < self.w && py < self.h`. Off-screen access is a silent no-op;
+  the renderer cannot panic regardless of terminal size (even a `w == 0` underflow wraps to a
+  huge index that the bound rejects).
+- **`app.rs` indexing** — `history[input_idx]` is safe because `input_idx ∈ 0..=5` while
+  `Playing` (`submit` flips to `Lost` as soon as `input_idx >= 6`) and every draft/typing path
+  runs only in `Playing`; `keyboard_letter_states` slices `history[..input_idx]` with
+  `input_idx <= 6 = history.len()`. `type_letter`/`backspace` are guarded on `input_len`.
+  `copy_from_slice` copies two `[u8; 5]`. `str::from_utf8(&target)` feeds `unwrap_or_else`.
+- **`ui.rs` layout math** — the sole runtime division (`div_round`) is only called from `gaps`
+  with divisor `d = n - 1 >= 1` (guarded `n <= 1`); `gaps`/`stack_sizes` run with
+  `n <= SECTION_COUNT = 4 < MAX_GUESSES`, so their fixed-size arrays never overflow;
+  `col_budget` steps `cell` down from an odd `full` and stops at 1; `saturating_sub`/`div_ceil`
+  guard every spot that could underflow.
+- **`game::check`** — bounds `0..WORD_LEN` over `[u8; 5]` arrays passed by `submit`.
+- **Range-coder divisions** (`decode_freq`: `range /= tot`, then `code / range`) — `range >= TOP
+  = 2^24` is held by the renorm loops, and every `tot <= WORD_COUNT = 14853 < 2^24`, so
+  `range / tot >= 1`: `code / range` can never divide by zero.
+
+**Load-bearing invariant** — two sites are *not* locally guarded; both reduce to the same
+assumption, that `union.bin` is exactly the encoder's output (fixed at build time, checked by
+the `union_round_trips` test). They carry a source comment pointing here:
+
+1. **`unreachable!` in `pick_target` (`game.rs`)** — hit only if the stream holds fewer than
+   `ANSWER_COUNT` colour-A words. The encoder emits exactly `ANSWER_COUNT`.
+2. **Divide-by-zero in `decode_freq` via `tot == 0`** — the only zero total is
+   `char_tot(ctx, lo)` with `lo == 26` (empty sum), which needs a word whose first differing
+   character exceeds `'z'`. The sort proves `w[p] > prev[p]` with `w[p] <= 25`, so
+   `prev[p] <= 24` ⟹ `lo <= 25` ⟹ at least the `s = 25` term ⟹ `char_tot >= 1`. The colour
+   decode's `remaining` likewise stays in `1..=WORD_COUNT`, and zero `freq` values are excluded
+   by the sampling-without-replacement logic.
+
+No runtime `assert!` was added to "lock" these: that would create panic sites and grow the
+binary — the opposite of the goal. The invariant is enforced where it belongs, at build time.
+
 ## Tried and rejected (don't redo these)
 
 - **`ORDER` as a const generic on `Model`.** −48 B `.text`, **0 B in the `.exe`**. The compiler
