@@ -7,7 +7,6 @@ use crate::game::{LetterState, MAX_GUESSES, WORD_LEN};
 
 const CELL_W: usize = 7;
 const CELL_H: usize = 3;
-const BOARD_W: usize = WORD_LEN * (CELL_W + 1) - 1; // 39
 const BOARD_H: usize = MAX_GUESSES * (CELL_H + 1) - 1; // 23
 
 const KEYBOARD_ROWS: [&str; 3] = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
@@ -51,9 +50,6 @@ pub enum Action {
 const BTN_W: usize = 5; // full ENTER / BACK buttons flanking the bottom row
 const BTN_W_MIN: usize = 3; // degraded (E) / (B) buttons
 
-// Preferred startup terminal size (cols, rows): the fully-expanded layout plus a 1-row
-// gap between each pair of sections (one gap fewer than there are sections).
-pub const PREFERRED_SIZE: (u16, u16) = (BOARD_W as u16, (REQ_VERT + SECTION_COUNT - 1) as u16);
 const MINI_W: usize = WORD_LEN; // narrowest terminal that can show a board
 const MINI_H: usize = MAX_GUESSES; // shortest terminal that can show a board
 

@@ -25,6 +25,10 @@ fn main() {
     let res = Path::new(&manifest).join("res");
     let out = Path::new(&out_dir);
 
+    // `--cfg immediate_abort` (set alongside -Cpanic=immediate-abort) gates the now-unreachable
+    // panic hook out of main.rs; declare it here so the unexpected-cfg lint stays quiet.
+    println!("cargo::rustc-check-cfg=cfg(immediate_abort)");
+
     println!("cargo:rerun-if-changed=res/answer_words.txt");
     println!("cargo:rerun-if-changed=res/valid_words.txt");
     println!("cargo:rerun-if-changed=src/codec.rs");

@@ -1,0 +1,114 @@
+# Building
+
+Three profiles, each with **one command per platform that produces the smallest binary for that
+profile** (link-time identical-code folding is folded in wherever the toolchain allows):
+
+- **Stable** — full std, no nightly, no `rust-src`.
+- **build-std** — nightly; std recompiled without its backtrace machinery. The recommended build.
+- **immediate-abort** — nightly; most aggressive (every panic → bare abort).
+
+The `build-std` and `immediate-abort` profiles need, once:
+
+```
+rustup toolchain install nightly --component rust-src
+```
+
+---
+
+## Windows (PowerShell, MSVC)
+
+The MSVC link optimizations (`/OPT:ICF`, `/DEBUG:NONE`) are already in `.cargo/config.toml`, so
+they apply to every profile automatically — no extra flags below. Output: stable →
+`target\release\wordle_tui.exe`; nightly → `target\x86_64-pc-windows-msvc\release\wordle_tui.exe`.
+
+**Stable:**
+
+```powershell
+cargo build --release
+```
+
+**build-std:**
+
+```powershell
+cargo +nightly build --release --target x86_64-pc-windows-msvc
+```
+
+**immediate-abort:**
+
+```powershell
+$env:RUSTFLAGS = '-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clink-arg=/OPT:ICF -Clink-arg=/DEBUG:NONE'
+cargo +nightly build --release --target x86_64-pc-windows-msvc
+Remove-Item Env:RUSTFLAGS
+```
+
+> `RUSTFLAGS` **overrides** the `[target]` block (it does not merge), so `/OPT:ICF` and
+> `/DEBUG:NONE` are repeated in the immediate-abort line.
+
+---
+
+## Linux — glibc (bash)
+
+ICF has no default-linker equivalent, so it is passed on the command line: the **stable** profile
+uses the system `lld` (`-fuse-ld=lld`, needs the `lld` package); the **nightly** profiles use the
+toolchain's bundled `rust-lld` (`-Clinker-features=+lld`, no install). Output: stable →
+`target/release/wordle_tui`; nightly → `target/x86_64-unknown-linux-gnu/release/wordle_tui`.
+
+**Stable:**
+
+```bash
+RUSTFLAGS="-Clink-arg=-fuse-ld=lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none" \
+  cargo build --release --target x86_64-unknown-linux-gnu
+```
+
+**build-std:**
+
+```bash
+RUSTFLAGS="-Zunstable-options -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none" \
+  cargo +nightly build --release --target x86_64-unknown-linux-gnu
+```
+
+**immediate-abort:**
+
+```bash
+RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none" \
+  cargo +nightly build --release --target x86_64-unknown-linux-gnu
+```
+
+> `RUSTFLAGS` **overrides** the `[target]` block, so `--build-id=none` is repeated in every line.
+> Without a system `lld`, drop `-Clink-arg=-fuse-ld=lld -Clink-arg=-Wl,--icf=all` from the stable
+> line (it falls back to `cargo build --release`, slightly larger).
+
+---
+
+## Linux — musl (bash, fully static)
+
+Produces a static binary with no runtime dependencies. Install the target once **on each toolchain
+you build with** — the nightly profiles need it on nightly for its prebuilt CRT:
+
+```bash
+rustup target add x86_64-unknown-linux-musl                     # stable profile
+rustup target add --toolchain nightly x86_64-unknown-linux-musl # build-std / immediate-abort
+```
+
+Output: `target/x86_64-unknown-linux-musl/release/wordle_tui`.
+
+**Stable:**
+
+```bash
+RUSTFLAGS="-Clink-arg=-fuse-ld=lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none" \
+  cargo build --release --target x86_64-unknown-linux-musl
+```
+
+**build-std:**
+
+```bash
+RUSTFLAGS="-Zunstable-options -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none" \
+  cargo +nightly build --release --target x86_64-unknown-linux-musl
+```
+
+**immediate-abort:**
+
+```bash
+RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none" \
+  cargo +nightly build --release --target x86_64-unknown-linux-musl
+```

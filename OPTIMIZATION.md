@@ -1,6 +1,15 @@
 # Binary size optimization
 
-Reference (before): **396,288** bytes. Goal: 308,224 bytes.
+> How to build each profile on each platform: **[BUILD.md](BUILD.md)**. This file is the rationale
+> and the measured sizes; it refers to profiles by name and does not repeat the commands.
+
+Reference (before): **396,288** bytes — the first crossterm+ratatui TUI, unoptimized.
+
+The original goal was to go below ~300 KB, roughly the size of the repo's **initial commit**
+(`3b320c2`, *"wordle game"*) — a plain stdin/stdout wordle solver (`rand` its only dependency, no
+TUI, word lists as raw text), written as throwaway beginner Rust with no size effort at all. It
+stands for what an unoptimised, naive CLI happens to compile to; the point of the exercise was to
+bring the full interactive TUI below even that.
 
 Initial `.text` breakdown (cargo-bloat): std 72.5 KB, ratatui_core 30 KB, wordle_tui 13.9 KB,
 crossterm 10.3 KB, ratatui_widgets 8.5 KB, hashbrown 8.2 KB, kasuari 6.8 KB, parking_lot 3 KB,
@@ -21,7 +30,7 @@ Embedded data: valid.bin 62,570 + answers.bin 11,695 = ~74 KB (raw 5-letter ASCI
 | 7 | Streaming varint lookup (drops OnceLock/Vec/binary_search) | 214,528 | −1,024 |
 | 8 | Data as a single arithmetic-coded union (see `codec.rs`); source split into `build/` modules; idiomatic pass | 214,016 | −512 |
 
-**Goal (308,224) beaten at step 2** — mostly by removing ratatui (which dragged in kasuari,
+**~300 KB goal beaten at step 2** — mostly by removing ratatui (which dragged in kasuari,
 hashbrown, lru, compact_str, unicode-*, parking_lot, …) and rendering directly through
 crossterm. The ratatui cassowary layout algorithm was reimplemented by hand; its exact
 integer rounding is reproduced by the unified spacer model
@@ -43,18 +52,18 @@ stream. Compression is essentially at the information-theoretic limit; nothing m
 the data side. The encoder (build) and decoder (game) share `codec.rs` verbatim so they agree
 bit-for-bit — a `union_round_trips` test guards this.
 
-## Measuring (`size.ps1`)
+## Measuring (`tools/size.ps1`)
 
 The shipped `.exe` is a PE file whose sections are padded to 512 B, so a real saving of a few
 dozen bytes often does **not** change the file size — it hides in the padding. Compare the sum of
 each section's `VirtualSize` (un-padded), not the file size.
 
-`size.ps1` (repo root) wraps `cargo build`, then prints every section's `VirtualSize` plus a
+`tools/size.ps1` wraps `cargo build`, then prints every section's `VirtualSize` plus a
 total. Use it as the measurement of record:
 
 ```
-.\size.ps1                 # = cargo +nightly build --release, then the section report
-.\size.ps1 build --release # stable build, then the report
+.\tools\size.ps1                 # = cargo +nightly build --release --target x86_64-pc-windows-msvc, then the report
+.\tools\size.ps1 build --release # stable build, then the report
 ```
 
 - **file on disk** = what you distribute (512 B-aligned).
@@ -63,19 +72,94 @@ total. Use it as the measurement of record:
 (The build script runs before linking and can't see the final binary, so the report must be a
 post-build wrapper, not a `cargo:warning`.)
 
+`tools/size.ps1` parses the PE section table (and is PowerShell), so it is **Windows-only**. On Linux the
+ELF equivalent — un-padded section sizes, the number to compare — comes from binutils `size`:
+
+```
+size -A target/x86_64-unknown-linux-gnu/release/wordle_tui   # per-section, plus a Total
+```
+
+The on-disk file size (`wc -c` / `ls -l`) is the distributable; unlike PE's 512 B section padding,
+ELF pads only to page alignment, so small savings still often hide in padding — compare the `size`
+`Total` (or use `bloaty` for a symbol-level breakdown), not the file size.
+
 ## build-std levers (nightly, `.cargo/config.toml`)
 
 Recompiling std from source with our profile (opt-level=z, LTO). NOT source changes; the game is
-identical. Requires `rustup toolchain install nightly --component rust-src`. The `[unstable]`
-table is ignored by stable cargo, so the stable build is untouched.
+identical; the nightly toolchain needs `rust-src`. The `[unstable]` table is ignored by stable
+cargo, so the stable build is untouched.
 
-| Variant | Command | `.exe` | Behavior |
-|---------|---------|--------|----------|
-| Stable (default) | `cargo build --release` | **214,016** | 100% preserved, no prerequisites |
-| build-std, no `backtrace` | `cargo +nightly build --release` | **117,760** | terminal still restored on panic |
-| + immediate-abort | `RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort -Clink-arg=/OPT:ICF" cargo +nightly build --release` | **87,040** | panic → bare abort: terminal **not** restored (edge case) |
+Three profiles, by increasing aggressiveness. **Build commands for every platform live in
+[BUILD.md](BUILD.md)** — this file only names the profile and its effect:
 
-The recommended no-compromise build is now **build-std without `backtrace` (117,760)** — see below.
+- **Stable (default)** — 100% preserved, no prerequisites, cross-platform.
+- **build-std, no `backtrace`** — std recompiled without its backtrace machinery; the panic hook
+  still restores the terminal. The recommended no-compromise build.
+- **immediate-abort** — every panic lowers to a bare abort; the terminal is **not** restored on a
+  bug-panic (edge case — see the panic audit above).
+
+Windows `.exe`:
+
+| Profile | `.exe` | Behavior |
+|---------|-------:|----------|
+| Stable (default) | **214,016** | 100% preserved, no prerequisites |
+| build-std, no `backtrace` | **117,248** | terminal still restored on panic |
+| immediate-abort | **87,040** | panic → bare abort: terminal **not** restored (edge case) |
+
+`build-std` requires an explicit `--target`; the config intentionally does **not** pin one in
+`[build]`, so plain `cargo build` stays host-native and the project builds on any platform. The
+MSVC linker flags are keyed under `[target.x86_64-pc-windows-msvc]` and are simply inert elsewhere.
+
+### On Linux
+
+The same three profiles build on Linux (link optimizations under
+`[target.x86_64-unknown-linux-gnu]` in `.cargo/config.toml`). ICF (identical-code folding) is
+folded into each profile's build command rather than being a profile of its own.
+
+**ELF vs PE flag mapping.** `/DEBUG:NONE` → `-Wl,--build-id=none` (drops `.note.gnu.build-id`, in
+the `[target]` block; measured **−112 B** vs. the linker's default build-id). `/OPT:ICF` has **no
+default-linker equivalent** — GNU `bfd` does no identical-code folding, so ICF is done by `lld`:
+the nightly profiles use the bundled `rust-lld` (`-Clinker-features=+lld`, no install), the stable
+profile the system `lld` (`-fuse-ld=lld`). An env `RUSTFLAGS` overrides the `[target]` block rather
+than merging, so `--build-id=none` is repeated in every command (same gotcha as Windows). ICF's
+yield is small (~1–3 KB), matching `/OPT:ICF` on Windows.
+
+### Measured Linux sizes (WSL Ubuntu, rustc 1.97, on-disk bytes; smallest per profile)
+
+**glibc — dynamically linked** (the on-disk size *excludes* the system libc, loaded at runtime):
+
+| Profile | Size | Δ baseline |
+|---------|-----:|-----------:|
+| Stable | 418,184 | — |
+| build-std, no `backtrace` | 184,760 | −55.8% |
+| immediate-abort | 125,896 | −69.9% |
+
+**musl — statically linked** (self-contained, *embeds* libc + unwinder; zero runtime deps):
+
+| Profile | Size | Δ baseline |
+|---------|-----:|-----------:|
+| Stable | 505,872 | — |
+| build-std, no `backtrace` | 279,568 | −44.7% |
+| immediate-abort | 148,784 | −70.6% |
+
+Note musl static is **larger on disk than the glibc builds**, not smaller: it bakes the whole libc
+into the file. The glibc numbers look smaller only because they offload libc to the system at load
+time — the musl binary is the honest "everything included" size and runs on any Linux with no deps.
+
+**build-std + musl gotcha.** build-std rebuilds the Rust sysroot from source but does **not** build
+the musl C runtime; the CRT objects (`rcrt1.o`, `libunwind.a`, …) come from the *prebuilt* target's
+`lib/rustlib/x86_64-unknown-linux-musl/lib/self-contained/`. So that target must be installed on the
+**nightly** toolchain (not just stable), else linking fails with `cannot find rcrt1.o` / `-lunwind`;
+`musl-tools` is *not* what fixes it. BUILD.md's musl section spells out the `rustup target add` step.
+
+**Cross-platform caveat.** These are **not** directly comparable to the Windows `.exe` numbers in
+this file — different linker, CRT, and section layout (and glibc offloads libc while the Windows
+`.exe` and musl do not). To compare platforms, re-measure a Windows and a Linux build under the
+same lever rather than reading across the two tables.
+
+The immediate-abort command also passes `--cfg immediate_abort`, which gates the panic hook out of
+`main.rs`: that build lowers every panic to a bare abort that bypasses the hook, so registering one
+is dead weight (declared via `cargo::rustc-check-cfg` in `build/main.rs` to keep the lint quiet).
 
 ### The big lever: build std without the `backtrace` feature
 
@@ -201,13 +285,49 @@ Most idiomatic cleanups compile identically (confirmed byte-neutral): `Ordering`
 One was a genuine win — **`ui::center`: `(outer-inner+1)/2` → `saturating_sub(inner).div_ceil(2)`**,
 cleaner and **−32 B**. Lesson: idiomatic ≠ smaller; measure each change.
 
+### `/DEBUG:NONE`: drop the residual Debug Directory
+
+`strip = true` removes symbols but the linker still emits an IMAGE_DEBUG_DIRECTORY (a CodeView
+entry pointing at `wordle_tui.pdb`, plus a REPRO entry) — ~84 B, and it leaks the `.pdb` path as
+a string in `.rdata`. `-Clink-arg=/DEBUG:NONE` (in `[target.*] rustflags`) drops all but the 28 B
+REPRO stub. Measured: build-std **117,760 → 117,248** on disk (−512 B, crossed a section-alignment
+boundary); immediate-abort −56 B VirtualSize (0 on disk, hides in padding). Applies to stable too.
+
+**Gotcha:** setting `RUSTFLAGS` in the environment (the immediate-abort command) *overrides* the
+config's `[target.*] rustflags` — it does not merge. So `/OPT:ICF` and `/DEBUG:NONE` must be
+repeated in that command line or they are silently lost.
+
+### Dependency feature audit (crossterm & its deps) — nothing to gain
+
+Checked whether trimming crossterm or its transitive deps' cargo features could shed more:
+
+- **crossterm** is already at the floor: `default-features = false, features = ["windows",
+  "events"]`. That drops `bracketed-paste` and `derive-more` (→ no `derive_more`). `events` is
+  required for input; `windows` for raw-mode/console. crossterm has **no `no_std` support** (it is
+  std-only, via parking_lot/mio/etc.) — not an option.
+- **`events`** pulls `mio`/`signal-hook`/`signal-hook-mio` only under `cfg(unix)`; on Windows they
+  are not compiled (no such symbols in the binary — crossterm uses its WinAPI event source).
+- **`parking_lot` has `default = []`** — no default features to strip; the ~2.8 KB is its base
+  mutex/`Once` (used by crossterm's `INTERNAL_EVENT_READER: Mutex<…>`), irreducible by feature.
+  Every parking_lot feature (`deadlock_detection`, `hardware-lock-elision`, `send_guard`, …) only
+  *adds* code.
+- **Cargo unifies features (union) across the graph**, so from our `Cargo.toml` we can only *add*
+  a transitive dep's features, never remove one that crossterm's own edge requests. Tuning
+  crossterm's deps from here is therefore impossible; the only lever would be `[patch]`-ing
+  crossterm, which buys nothing given `parking_lot`'s empty defaults.
+
 ## Stuck costs
 
-- **`parking_lot` (~3.3 KB):** a hard dependency of crossterm's `events` feature. Not removable
-  without losing input handling. Already on `default-features = false, features = ["windows",
-  "events"]`.
+- **`parking_lot` (~3.3 KB):** a hard dependency of crossterm's `events` feature (the global
+  `INTERNAL_EVENT_READER` mutex). Not removable without losing input handling, and not
+  feature-tunable (see the dependency audit above). Already on `default-features = false,
+  features = ["windows", "events"]`.
 - On **stable**, the panic/backtrace machinery (~12 KB), io::error fmt (~3 KB) and env (~2 KB) are
   unavoidably linked by the panic runtime — the `backtrace` lever above only exists on nightly.
+- **crossterm's TERM/NO_COLOR detection** (`std::env::var` + `from_utf8` + a `Once`, ~2 KB in the
+  immediate-abort build) exists purely so crossterm can choose ANSI vs WinAPI styling. The only
+  way to reclaim it is to bypass crossterm's `style`/`Color` commands and emit raw ANSI escapes
+  ourselves — a rewrite, and it would *not* free parking_lot (events still needs the mutex).
 - Everything else in `.text` is either ours (`main`, `ui::build_grid`, `app::submit`,
   `codec::decode_word`) or genuinely-used std/crossterm.
 
@@ -215,5 +335,5 @@ cleaner and **−32 B**. Lesson: idiomatic ≠ smaller; measure each change.
 
 - Baseline: 396,288
 - Stable optimized (default, no prerequisites): **214,016** (−46.0%)
-- build-std nightly, no `backtrace`, terminal still restored: **117,760** (−70.3%)
+- build-std nightly, no `backtrace`, terminal still restored: **117,248** (−70.4%)
 - + immediate-abort (terminal not restored on panic): **87,040** (−78.0%)

@@ -21,11 +21,13 @@ use ui::Action;
 fn init_terminal() -> io::Result<Stdout> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
+    // No SetSize: the layout adapts to whatever size the terminal is (see ui::build_grid), and
+    // forcing a resize corrupts the alternate screen's cursor restore, leaving the shell prompt
+    // drawn over old output on exit. Not touching the size keeps ?1049 save/restore clean.
     execute!(
         stdout,
         EnterAlternateScreen,
         EnableMouseCapture,
-        terminal::SetSize(ui::PREFERRED_SIZE.0, ui::PREFERRED_SIZE.1),
         SetTitle("Wordle"),
         cursor::Hide
     )?;
@@ -124,6 +126,10 @@ fn main() {
     // Minimal hook: restore the terminal, then exit. We `exit(101)` rather than return
     // (which would let panic = "abort" call abort()): on Windows abort() hands off
     // to Windows Error Reporting, a ~1s stall before the shell returns. exit() skips it.
+    // Gated out under `--cfg immediate_abort`: that build compiles every panic to a bare
+    // abort that bypasses the panic runtime (and thus this hook) entirely, so registering
+    // one there is pure dead weight. See OPTIMIZATION.md "immediate-abort safety".
+    #[cfg(not(immediate_abort))]
     std::panic::set_hook(Box::new(|_| {
         restore_terminal();
         std::process::exit(101);
