@@ -52,36 +52,44 @@ stream. Compression is essentially at the information-theoretic limit; nothing m
 the data side. The encoder (build) and decoder (game) share `codec.rs` verbatim so they agree
 bit-for-bit — a `union_round_trips` test guards this.
 
-## Measuring (`tools/size.ps1`)
+## Measuring (`tools/stats.rs`, `cargo run --example stats`)
 
 The shipped `.exe` is a PE file whose sections are padded to 512 B, so a real saving of a few
 dozen bytes often does **not** change the file size — it hides in the padding. Compare the sum of
 each section's `VirtualSize` (un-padded), not the file size.
 
-`tools/size.ps1` wraps `cargo build`, then prints every section's `VirtualSize` plus a
-total. Use it as the measurement of record:
+`cargo run --example stats` prints the compression report **and**, once the game is built, the
+binary's on-disk size plus every PE section's `VirtualSize` and their total. It only *measures*
+(it does not build), so build first, then run it:
 
 ```
-.\tools\size.ps1                 # = cargo +nightly build --release --target x86_64-pc-windows-msvc, then the report
-.\tools\size.ps1 build --release # stable build, then the report
+cargo build --release                          # or any BUILD.md profile
+cargo run --example stats                       # measures the freshest release binary it finds
+cargo run --example stats -- <path-to-binary>   # measure a specific binary
 ```
+
+Without an argument it looks for the release outputs BUILD.md documents (the MSVC triple first,
+then plain `target/release`); the argument overrides that.
 
 - **file on disk** = what you distribute (512 B-aligned).
 - **total VirtualSize** = real code + data, no padding. Compare *this* between changes.
 
-(The build script runs before linking and can't see the final binary, so the report must be a
-post-build wrapper, not a `cargo:warning`.)
+(The build script runs before linking and can't see the final binary, so the report is a separate
+post-build tool, not a `cargo:warning`.)
 
-`tools/size.ps1` parses the PE section table (and is PowerShell), so it is **Windows-only**. On Linux the
-ELF equivalent — un-padded section sizes, the number to compare — comes from binutils `size`:
+The tool prints the section breakdown on both platforms: a PE parser (`#[cfg(windows)]`) and an ELF
+parser (`#[cfg(target_os = "linux")]`) whose per-section sizes and total match binutils `size -A`
+exactly (verified). Elsewhere it prints the on-disk size only. For an independent cross-check or a
+symbol-level breakdown on Linux:
 
 ```
 size -A target/x86_64-unknown-linux-gnu/release/wordle_tui   # per-section, plus a Total
+bloaty  target/x86_64-unknown-linux-gnu/release/wordle_tui   # symbol-level attribution
 ```
 
 The on-disk file size (`wc -c` / `ls -l`) is the distributable; unlike PE's 512 B section padding,
-ELF pads only to page alignment, so small savings still often hide in padding — compare the `size`
-`Total` (or use `bloaty` for a symbol-level breakdown), not the file size.
+ELF pads only to page alignment, so small savings still often hide in padding — compare the section
+`Total`, not the file size.
 
 ## build-std levers (nightly, `.cargo/config.toml`)
 

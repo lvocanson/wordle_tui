@@ -12,14 +12,11 @@ mod words;
 use std::env;
 use std::fs;
 use std::path::Path;
-use std::time::Instant;
 
-use encode::{best_model, MAX_INC, MAX_ORDER};
+use encode::best_model;
 use words::{merge_words, read_words, word_length, WordKind};
 
 fn main() {
-    let t0 = Instant::now();
-
     let manifest = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo");
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR is set by cargo");
     let res = Path::new(&manifest).join("res");
@@ -48,7 +45,6 @@ fn main() {
     valid.sort_unstable();
     valid.dedup();
     let answer_count = answers.len();
-    let valid_count = valid.len();
 
     // Merge into one sorted union, tagging each word as an answer (colour A) or valid-only.
     let union: Vec<(Vec<u8>, bool)> = merge_words(answers, valid)
@@ -71,21 +67,4 @@ fn main() {
         ),
     )
     .unwrap_or_else(|e| panic!("cannot write constants.rs: {e}"));
-
-    let source = fs::metadata(&answers_txt).map(|m| m.len()).unwrap_or(0)
-        + fs::metadata(&valid_txt).map(|m| m.len()).unwrap_or(0);
-    println!(
-        "cargo:warning=[wordle] {answer_count} answers  +  {valid_count} valid extensions  =  {} words  \
-         (sorted, disjoint, all {word_len} letters ✓)  [{:.1?}]",
-        union.len(),
-        t0.elapsed()
-    );
-    println!(
-        "cargo:warning=[wordle] packed {source} B (source) -> {} B (compressed)  = {:.1}%  \
-         ({:.2} B/word)  [best of {} models: order {order}, inc {inc}]",
-        blob.len(),
-        blob.len() as f64 / source as f64 * 100.0,
-        blob.len() as f64 / union.len() as f64,
-        MAX_ORDER * MAX_INC as usize,
-    );
 }
