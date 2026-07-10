@@ -25,7 +25,7 @@ impl App {
         let target = game::pick_target(game::random_seed());
         App {
             target,
-            history: [([0; WORD_LEN], [LetterState::WrongSpot; WORD_LEN]); MAX_GUESSES],
+            history: [([0; WORD_LEN], [LetterState::Misplaced; WORD_LEN]); MAX_GUESSES],
             input_idx: 0,
             input_len: 0,
             phase: Phase::Playing,
@@ -34,9 +34,9 @@ impl App {
         }
     }
 
-    pub fn type_letter(&mut self, l: u8) {
+    pub fn type_letter(&mut self, letter: u8) {
         if self.input_len < WORD_LEN {
-            self.history[self.input_idx].0[self.input_len] = l;
+            self.history[self.input_idx].0[self.input_len] = letter;
             self.input_len += 1;
             self.message = None;
         }
@@ -45,7 +45,7 @@ impl App {
     pub fn backspace(&mut self) {
         if self.input_len > 0 {
             self.input_len -= 1;
-            self.history[self.input_idx].0[self.input_len] = 0u8;
+            self.history[self.input_idx].0[self.input_len] = 0;
             self.message = None;
         }
     }
@@ -89,7 +89,7 @@ impl App {
         } else if self.input_idx >= game::MAX_GUESSES {
             self.phase = Phase::Lost;
             self.controls = END_CONTROLS;
-            let word = str::from_utf8(&self.target).map(|str| str.to_ascii_uppercase());
+            let word = str::from_utf8(&self.target).map(|s| s.to_ascii_uppercase());
             self.message = Some(format!(
                 "The word was {}.",
                 word.unwrap_or_else(|_| "?????".to_string())
@@ -105,7 +105,7 @@ mod tests {
     fn app_with_target(target: [u8; WORD_LEN]) -> App {
         App {
             target,
-            history: [([0; WORD_LEN], [LetterState::WrongSpot; WORD_LEN]); MAX_GUESSES],
+            history: [([0; WORD_LEN], [LetterState::Misplaced; WORD_LEN]); MAX_GUESSES],
             input_idx: 0,
             input_len: 0,
             phase: Phase::Playing,
@@ -149,10 +149,7 @@ mod tests {
         app.submit();
 
         assert_eq!(app.phase, Phase::Won);
-        assert_eq!(
-            app.history[app.input_idx - 1].1,
-            [LetterState::CorrectSpot; 5]
-        );
+        assert_eq!(app.history[app.input_idx - 1].1, [LetterState::Correct; 5]);
     }
 
     #[test]

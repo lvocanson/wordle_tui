@@ -137,6 +137,9 @@ fn gaps(n: usize, extra: usize) -> [usize; MAX_GUESSES] {
         return g;
     }
     let d = n - 1;
+    
+    // Indexed rather than `iter_mut().take(d)`: the plain loop optimizes smaller here.
+    #[allow(clippy::needless_range_loop)]
     for i in 0..d {
         g[i] = div_round((i + 1) * extra, d) - div_round(i * extra, d);
     }
@@ -146,11 +149,7 @@ fn gaps(n: usize, extra: usize) -> [usize; MAX_GUESSES] {
 // Left/top offset that centers an `inner`-wide block in `outer`, biasing the extra
 // odd cell to the trailing side so a lone centered glyph never drifts left.
 fn center(outer: usize, inner: usize) -> usize {
-    if outer <= inner {
-        0
-    } else {
-        (outer - inner + 1) / 2
-    }
+    outer.saturating_sub(inner).div_ceil(2)
 }
 
 // Horizontal budget shared by board and keyboard, priority interior > gaps > center:
@@ -200,40 +199,24 @@ enum CellColor {
     Submitted(LetterState),
 }
 
+// Background palette (24-bit). Empty cells are near-black; a draft cell (holds a typed letter
+// not yet submitted) is a lighter grey; the three submitted states are Wordle's green / yellow
+// / grey.
+const EMPTY_BG: Color = Color::Rgb { r: 18, g: 18, b: 19 };
+const DRAFT_BG: Color = Color::Rgb { r: 18, g: 18, b: 19 };
+const KEY_BG: Color = Color::Rgb { r: 129, g: 131, b: 132 };
+const CORRECT_BG: Color = Color::Rgb { r: 83, g: 141, b: 78 };
+const MISPLACED_BG: Color = Color::Rgb { r: 181, g: 159, b: 59 };
+const ABSENT_BG: Color = Color::Rgb { r: 58, g: 58, b: 60 };
+
 fn cell_bg_color(c: &CellColor) -> Color {
     match c {
-        CellColor::Empty => Color::Rgb {
-            r: 18,
-            g: 18,
-            b: 19,
-        },
-        CellColor::Draft => Color::Rgb {
-            r: 18,
-            g: 18,
-            b: 19,
-        },
-        CellColor::Keyboard => Color::Rgb {
-            r: 129,
-            g: 131,
-            b: 132,
-        },
-        CellColor::Submitted(s) => match s {
-            LetterState::CorrectSpot => Color::Rgb {
-                r: 83,
-                g: 141,
-                b: 78,
-            },
-            LetterState::WrongSpot => Color::Rgb {
-                r: 181,
-                g: 159,
-                b: 59,
-            },
-            LetterState::NotInAnySpot => Color::Rgb {
-                r: 58,
-                g: 58,
-                b: 60,
-            },
-        },
+        CellColor::Empty => EMPTY_BG,
+        CellColor::Draft => DRAFT_BG,
+        CellColor::Keyboard => KEY_BG,
+        CellColor::Submitted(LetterState::Correct) => CORRECT_BG,
+        CellColor::Submitted(LetterState::Misplaced) => MISPLACED_BG,
+        CellColor::Submitted(LetterState::Absent) => ABSENT_BG,
     }
 }
 
@@ -337,9 +320,9 @@ fn keyboard_letter_states(app: &App) -> [Option<LetterState>; 26] {
 fn better_state(a: LetterState, b: LetterState) -> LetterState {
     use LetterState::*;
     match (a, b) {
-        (CorrectSpot, _) | (_, CorrectSpot) => CorrectSpot,
-        (WrongSpot, _) | (_, WrongSpot) => WrongSpot,
-        _ => NotInAnySpot,
+        (Correct, _) | (_, Correct) => Correct,
+        (Misplaced, _) | (_, Misplaced) => Misplaced,
+        _ => Absent,
     }
 }
 

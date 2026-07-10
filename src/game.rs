@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::codec::{decode_word, Model, RangeDecoder};
@@ -12,9 +13,9 @@ static UNION_RAW: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/union.bin"))
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LetterState {
-    CorrectSpot,
-    WrongSpot,
-    NotInAnySpot,
+    Correct,
+    Misplaced,
+    Absent,
 }
 
 // Decode the colour bit that follows each word: true = answer (colour A). Sampling without
@@ -48,31 +49,31 @@ pub fn is_valid(word: &[u8]) -> bool {
     for _ in 0..WORD_COUNT {
         let w = decode_word(&mut dec, &mut model, prev.as_deref(), WORD_LEN);
         decode_color(&mut dec, &mut remaining, &mut remaining_a);
-        match w.as_slice().cmp(target.as_slice()) {
-            std::cmp::Ordering::Equal => return true,
-            std::cmp::Ordering::Greater => return false,
-            std::cmp::Ordering::Less => prev = Some(w),
+        match w.cmp(&target) {
+            Ordering::Equal => return true,
+            Ordering::Greater => return false,
+            Ordering::Less => prev = Some(w),
         }
     }
     false
 }
 
 pub fn check(target: &[u8], guess: &[u8]) -> [LetterState; WORD_LEN] {
-    let mut res = [LetterState::NotInAnySpot; WORD_LEN];
+    let mut res = [LetterState::Absent; WORD_LEN];
     let mut used = [false; WORD_LEN];
     for i in 0..WORD_LEN {
         if guess[i] == target[i] {
-            res[i] = LetterState::CorrectSpot;
+            res[i] = LetterState::Correct;
             used[i] = true;
         }
     }
     for i in 0..WORD_LEN {
-        if res[i] == LetterState::CorrectSpot {
+        if res[i] == LetterState::Correct {
             continue;
         }
         for j in 0..WORD_LEN {
             if !used[j] && guess[i] == target[j] {
-                res[i] = LetterState::WrongSpot;
+                res[i] = LetterState::Misplaced;
                 used[j] = true;
                 break;
             }
@@ -101,11 +102,7 @@ pub fn pick_target(seed: u64) -> [u8; WORD_LEN] {
         let w = decode_word(&mut dec, &mut model, prev.as_deref(), WORD_LEN);
         if decode_color(&mut dec, &mut remaining, &mut remaining_a) {
             if seen == idx {
-                let mut out = [0u8; WORD_LEN];
-                for (o, &v) in out.iter_mut().zip(&w) {
-                    *o = b'a' + v;
-                }
-                return out;
+                return std::array::from_fn(|i| b'a' + w[i]);
             }
             seen += 1;
         }

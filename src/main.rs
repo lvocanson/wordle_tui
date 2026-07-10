@@ -44,10 +44,6 @@ fn restore_terminal() {
 
 fn run(out: &mut Stdout) -> io::Result<()> {
     let mut app = App::new();
-    // Size is driven by Resize events, never polled per-frame: under a flood of mouse
-    // motion events the loop spins fast, and a per-frame terminal::size() there raced
-    // into transient bad reads -> spurious Clear + squeezed relayout (cells blanked to
-    // the terminal default) and clicks hit-testing a stale/wrong grid.
     let mut size = terminal::size()?;
     let mut dirty = true;
     let mut grid = ui::build_grid(size.0 as usize, size.1 as usize, &app); // kept for hit-testing
@@ -125,10 +121,12 @@ fn handle_action(app: &mut App, action: Action) {
 }
 
 fn main() {
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
+    // Minimal hook: restore the terminal, then exit. We `exit(101)` rather than return
+    // (which would let panic = "abort" call abort()): on Windows abort() hands off
+    // to Windows Error Reporting, a ~1s stall before the shell returns. exit() skips it.
+    std::panic::set_hook(Box::new(|_| {
         restore_terminal();
-        default_hook(info);
+        std::process::exit(101);
     }));
 
     if let Ok(mut terminal) = init_terminal() {

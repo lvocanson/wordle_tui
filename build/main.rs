@@ -53,7 +53,8 @@ fn main() {
 
     let (order, inc, blob) = best_model(&union, answer_count as u32, word_len);
 
-    fs::write(out.join("union.bin"), &blob).unwrap_or_else(|e| panic!("cannot write union.bin: {e}"));
+    fs::write(out.join("union.bin"), &blob)
+        .unwrap_or_else(|e| panic!("cannot write union.bin: {e}"));
     fs::write(
         out.join("constants.rs"),
         format!(

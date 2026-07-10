@@ -91,7 +91,11 @@ impl<'a> RangeDecoder<'a> {
     }
 
     fn next(&mut self) -> u32 {
-        let b = if self.pos < self.data.len() { self.data[self.pos] as u32 } else { 0 };
+        let b = if self.pos < self.data.len() {
+            self.data[self.pos] as u32
+        } else {
+            0
+        };
         self.pos += 1;
         b
     }

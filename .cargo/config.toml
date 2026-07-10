@@ -1,21 +1,23 @@
 # Build-size configuration.
 #
-# Three sizes depending on the toolchain used — with NO source changes between them:
+# Two sizes depending on the toolchain used — with NO source changes between them:
 #
 #   cargo build --release
 #       -> ~214 KB. STABLE toolchain. The [unstable] table below is silently ignored
-#          by stable cargo, so std is not recompiled.
+#          by stable cargo, so std is not recompiled and ships its full backtrace machinery.
 #
 #   cargo +nightly build --release
-#       -> ~157 KB. build-std recompiles std with the release profile (opt-level=z, LTO),
-#          which strips ~57 KB of dead std code. The program is STRICTLY identical
-#          (the panic hook still restores the terminal).
+#       -> ~115 KB. build-std recompiles std with the release profile (opt-level=z, LTO) AND
+#          without its `backtrace` feature (build-std-features = [] below). That drops the
+#          demangle + symbolize machinery — rustc_demangle, std::backtrace_rs, the dbghelp
+#          walk (~30 KB of .text) — which is dead weight here: nothing in the game prints a
+#          backtrace. The game is unchanged and the panic hook STILL restores the terminal;
+#          a bug-panic just aborts without a symbolized trace.
 #
+# Going further, `-Cpanic=immediate-abort` turns every panic (bounds-checks included) into a
+# bare abort, shedding the last ~3 KB of panic-message formatting. But then hooks no longer
+# run, so the terminal is NOT restored on a bug-panic — not worth 3 KB. To try it:
 #   RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort -Clink-arg=/OPT:ICF" cargo +nightly build --release
-#       -> ~125 KB. Additionally turns panics into an immediate abort: removes all the
-#          panic/backtrace/format machinery. Only visible effect: on a panic (a bug), the
-#          terminal is not restored. The game itself is unchanged. (RUSTFLAGS overrides the
-#          [target] rustflags below, so /OPT:ICF is repeated here to keep it.)
 #
 # Nightly prerequisite: rustup toolchain install nightly --component rust-src
 #
@@ -26,6 +28,9 @@
 
 [unstable]
 build-std = ["std", "panic_abort"]
+# Empty on purpose: builds std with none of its default features, dropping `backtrace` (see
+# the header note). Add features back here if a future dependency needs one.
+build-std-features = []
 
 [build]
 target = "x86_64-pc-windows-msvc"
