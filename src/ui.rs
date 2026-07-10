@@ -18,23 +18,44 @@ const KB_H: usize = KEYBOARD_ROWS.len() * (KEY_H + 1) - 1; // 5, 3 rows with 1-r
 
 const TITLE_H: usize = 1;
 const FOOTER_H: usize = 2;
-const REQ_VERT: usize = TITLE_H + BOARD_H + KB_H + FOOTER_H; // 31
+const REQ_VERT: usize = TITLE_H + BOARD_H + KB_H + FOOTER_H; // 31, fully-expanded layout
 
-// Clickable-region action codes stored in the hit map (0 = nothing). Letter keys
-// register their own lowercase byte (b'a'..=b'z'), which never collides with these.
-pub const ACT_BACK: u8 = 1;
-pub const ACT_ENTER: u8 = 2;
+// Number of `Section` variants; sizes the fixed layout arrays and the gap count.
+const SECTION_COUNT: usize = 4;
+
+// Vertical budget thresholds: as the terminal grows taller, features switch on in
+// priority order (most essential first). Each threshold is the cumulative height needed
+// for its feature plus everything above it, expressed as a sum of the base dimensions so
+// the numbers stay correct if MAX_GUESSES / CELL_H / KEY_H / … ever change.
+const MIN_H_BOARD: usize = MAX_GUESSES * KEY_H; // 6: one 1-tall row per guess
+const MIN_H_FOOTER_1: usize = MIN_H_BOARD + 1; // 7: message line
+const MIN_H_KEYBOARD: usize = MIN_H_FOOTER_1 + KEYBOARD_ROWS.len() * KEY_H; // 10
+const MIN_H_FOOTER_2: usize = MIN_H_KEYBOARD + 1; // 11: controls line
+const MIN_H_BOARD_GAPS: usize = MIN_H_FOOTER_2 + (MAX_GUESSES - 1); // 16: gaps between word rows
+const MIN_H_CELL_PAD: usize = MIN_H_BOARD_GAPS + MAX_GUESSES * (CELL_H - KEY_H); // 28: cells to full height
+const MIN_H_TITLE: usize = MIN_H_CELL_PAD + TITLE_H; // 29
+const MIN_H_KB_GAPS: usize = MIN_H_TITLE + (KEYBOARD_ROWS.len() - 1); // 31: gaps between keyboard rows
+
+// The incremental budget must reach exactly the fully-expanded layout height.
+const _: () = assert!(MIN_H_KB_GAPS == REQ_VERT);
+
+// What clicking a cell does. The whole area of every key and button is tagged with one
+// of these so a click can be replayed as if it were the equivalent keypress.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Letter(u8),
+    Back,
+    Enter,
+}
+
 const BTN_W: usize = 5; // full ENTER / BACK buttons flanking the bottom row
 const BTN_W_MIN: usize = 3; // degraded (E) / (B) buttons
 
-// Preferred startup terminal size (cols, rows): the vertical layout plus a
-// 1-row gap between each of the 4 categories (SpaceBetween spreads +3 evenly).
-pub const PREFERRED_SIZE: (u16, u16) = (BOARD_W as u16, (REQ_VERT + 3) as u16);
-const MINI_W: usize = WORD_LEN; // 5
-const MINI_H: usize = MAX_GUESSES; // 6
-
-// The too-small message hardcodes these dimensions; keep them in sync.
-const _: () = assert!(MINI_W == 5 && MINI_H == 6);
+// Preferred startup terminal size (cols, rows): the fully-expanded layout plus a 1-row
+// gap between each pair of sections (one gap fewer than there are sections).
+pub const PREFERRED_SIZE: (u16, u16) = (BOARD_W as u16, (REQ_VERT + SECTION_COUNT - 1) as u16);
+const MINI_W: usize = WORD_LEN; // narrowest terminal that can show a board
+const MINI_H: usize = MAX_GUESSES; // shortest terminal that can show a board
 
 // ----------------------------------------------------------------------------
 // Grid model
@@ -47,7 +68,7 @@ pub struct Grid {
     fg: Vec<Color>,
     bg: Vec<Color>,
     bold: Vec<bool>,
-    hit: Vec<u8>,
+    hit: Vec<Option<Action>>,
 }
 
 impl Grid {
@@ -59,28 +80,28 @@ impl Grid {
             fg: vec![Color::Reset; w * h],
             bg: vec![Color::Reset; w * h],
             bold: vec![false; w * h],
-            hit: vec![0u8; w * h],
+            hit: vec![None; w * h],
         }
     }
 
     // Tag a rectangle of cells with a click action for later hit-testing.
-    fn hit_rect(&mut self, x: usize, y: usize, w: usize, h: usize, action: u8) {
+    fn hit_rect(&mut self, x: usize, y: usize, w: usize, h: usize, action: Action) {
         for dy in 0..h {
             for dx in 0..w {
                 let (px, py) = (x + dx, y + dy);
                 if px < self.w && py < self.h {
-                    self.hit[py * self.w + px] = action;
+                    self.hit[py * self.w + px] = Some(action);
                 }
             }
         }
     }
 
-    // Action registered at a screen cell, or 0 if none (out-of-bounds included).
-    pub fn hit_test(&self, x: usize, y: usize) -> u8 {
+    // The action registered at a screen cell, if any (out-of-bounds reads as None).
+    pub fn hit_test(&self, x: usize, y: usize) -> Option<Action> {
         if x < self.w && y < self.h {
             self.hit[y * self.w + x]
         } else {
-            0
+            None
         }
     }
 
@@ -101,12 +122,15 @@ impl Grid {
     }
 }
 
-// round-half-up of a/b for non-negative integers.
-fn rnd(a: usize, b: usize) -> usize {
+// Round a/b to the nearest integer (ties up). Used to split space into whole cells
+// without ever losing or inventing a row/column to rounding.
+fn div_round(a: usize, b: usize) -> usize {
     (2 * a + b) / (2 * b)
 }
 
-// Gap widths distributed between `n` items across `extra` leftover (Flex::SpaceBetween).
+// Spread `extra` leftover rows/columns into the `n - 1` gaps between `n` items so the
+// items sit flush at both ends and the gaps differ by at most one — the discrete
+// equivalent of placing each item at its evenly-spaced ideal position.
 fn gaps(n: usize, extra: usize) -> [usize; MAX_GUESSES] {
     let mut g = [0usize; MAX_GUESSES];
     if n <= 1 {
@@ -114,12 +138,13 @@ fn gaps(n: usize, extra: usize) -> [usize; MAX_GUESSES] {
     }
     let d = n - 1;
     for i in 0..d {
-        g[i] = rnd((i + 1) * extra, d) - rnd(i * extra, d);
+        g[i] = div_round((i + 1) * extra, d) - div_round(i * extra, d);
     }
     g
 }
 
-// Offset of an `inner`-sized block centered within `outer` (Flex::Center, ceil).
+// Left/top offset that centers an `inner`-wide block in `outer`, biasing the extra
+// odd cell to the trailing side so a lone centered glyph never drifts left.
 fn center(outer: usize, inner: usize) -> usize {
     if outer <= inner {
         0
@@ -143,7 +168,9 @@ fn col_budget(w: usize, n: usize, full: usize) -> (usize, usize, usize) {
     (cell, gap, center(w, content))
 }
 
-// SpaceBetween placement of items with individual `sizes` within `len` (title/kb/footer).
+// Place differently-sized bands top-to-bottom within `len`, writing each band's start
+// row to `out`. Leftover height becomes even gaps between them (first band flush to the
+// top, last flush to the bottom); if they can't all fit, they just stack from the top.
 fn stack_sizes(sizes: &[usize], len: usize, out: &mut [usize]) {
     let n = sizes.len();
     let sum: usize = sizes.iter().sum();
@@ -210,6 +237,9 @@ fn cell_bg_color(c: &CellColor) -> Color {
     }
 }
 
+// `letter` is a space for empty cells, which paints nothing over the background — so the
+// glyph is written unconditionally. Cells are always at least 1x1 (see `col_budget`), so
+// the centered position can't underflow.
 fn draw_cell(grid: &mut Grid, x: usize, y: usize, w: usize, h: usize, letter: u8, c: CellColor) {
     let bg = cell_bg_color(&c);
     for dy in 0..h {
@@ -217,16 +247,14 @@ fn draw_cell(grid: &mut Grid, x: usize, y: usize, w: usize, h: usize, letter: u8
             grid.set(x + dx, y + dy, b' ', bg, bg, false);
         }
     }
-    if letter != 0 && w > 0 && h > 0 {
-        grid.set(
-            x + (w - 1) / 2,
-            y + (h - 1) / 2,
-            letter.to_ascii_uppercase(),
-            Color::White,
-            bg,
-            false,
-        );
-    }
+    grid.set(
+        x + (w - 1) / 2,
+        y + (h - 1) / 2,
+        letter.to_ascii_uppercase(),
+        Color::White,
+        bg,
+        false,
+    );
 }
 
 // ----------------------------------------------------------------------------
@@ -235,13 +263,14 @@ fn draw_cell(grid: &mut Grid, x: usize, y: usize, w: usize, h: usize, letter: u8
 
 fn draw_title(grid: &mut Grid, x: usize, y: usize, w: usize) {
     const T: &[u8] = b"- Wordle -";
-    let off = w.saturating_sub(T.len()) / 2; // Line::centered = (w-len)/2
+    let off = w.saturating_sub(T.len()) / 2; // center the title over the whole width
     grid.text(x + off, y, T, Color::Reset, Color::Reset, true);
 }
 
 fn draw_footer(grid: &mut Grid, app: &App, x: usize, y: usize, w: usize, h: usize) {
     let msg = app.message.as_deref().unwrap_or("");
-    // Paragraph centering: (w/2) - (len/2), clipped to the area width.
+    // Center each line, and clip it to the band so an over-long message can't spill
+    // past the right edge into neighbouring cells.
     let put = |grid: &mut Grid, row: usize, s: &str, fg: Color| {
         let off = (w / 2).saturating_sub(s.len() / 2);
         let visible = s.len().min(w.saturating_sub(off));
@@ -284,7 +313,7 @@ fn draw_board(grid: &mut Grid, app: &App, by: usize, w: usize, cell_h: usize, vg
             {
                 (app.history[app.input_idx].0[cell_idx], CellColor::Draft)
             } else {
-                (0u8, CellColor::Empty)
+                (b' ', CellColor::Empty)
             };
             draw_cell(grid, cx, ry, cell_w, cell_h, letter, status);
         }
@@ -331,7 +360,7 @@ fn draw_keys(
         };
         let key_x = x + j * (key_w + hgap);
         draw_cell(grid, key_x, y, key_w, 1, letter, color);
-        grid.hit_rect(key_x, y, key_w, 1, letter);
+        grid.hit_rect(key_x, y, key_w, 1, Action::Letter(letter));
     }
 }
 
@@ -368,10 +397,10 @@ fn draw_keyboard(grid: &mut Grid, app: &App, ky: usize, w: usize, vgap: usize) {
             } else {
                 (b"(E)", b"(B)")
             };
-            draw_button(grid, start, row_y, bw, enter, ACT_ENTER);
+            draw_button(grid, start, row_y, bw, enter, Action::Enter);
             let letters_x = start + bw + sep;
             draw_keys(grid, &states, row, letters_x, row_y, key_w, hgap);
-            draw_button(grid, letters_x + letters_w + sep, row_y, bw, back, ACT_BACK);
+            draw_button(grid, letters_x + letters_w + sep, row_y, bw, back, Action::Back);
         } else {
             let row_w = row.len() * key_w + (row.len() - 1) * hgap;
             draw_keys(
@@ -388,7 +417,7 @@ fn draw_keyboard(grid: &mut Grid, app: &App, ky: usize, w: usize, vgap: usize) {
 }
 
 // A grey labelled button that also registers its whole area as clickable.
-fn draw_button(grid: &mut Grid, x: usize, y: usize, w: usize, label: &[u8], action: u8) {
+fn draw_button(grid: &mut Grid, x: usize, y: usize, w: usize, label: &[u8], action: Action) {
     let bg = cell_bg_color(&CellColor::Keyboard);
     for dx in 0..w {
         grid.set(x + dx, y, b' ', bg, bg, false);
@@ -402,45 +431,41 @@ fn draw_button(grid: &mut Grid, x: usize, y: usize, w: usize, label: &[u8], acti
 // Top-level layout
 // ----------------------------------------------------------------------------
 
-// Enum-free section tags for the vertical stack (title/board/keyboard/footer).
-const S_TITLE: u8 = 0;
-const S_BOARD: u8 = 1;
-const S_KEYBOARD: u8 = 2;
-const S_FOOTER: u8 = 3;
+// The four stacked bands, top to bottom. A band is skipped entirely when the terminal
+// is too short to afford it (see the priority budget below).
+#[derive(Clone, Copy)]
+enum Section {
+    Title,
+    Board,
+    Keyboard,
+    Footer,
+}
 
 pub fn build_grid(w: usize, h: usize, app: &App) -> Grid {
     let mut grid = Grid::new(w, h);
 
-    // Priority-driven vertical budget. Each feature is enabled (high priority
-    // first) only while the running total of rows it needs still fits in `h`;
-    // the leftover is spread as gaps between sections (lowest priority). Column
-    // widths are handled separately and are not part of this budget.
-    //
-    //   prio  feature                              rows   cumulative
-    //   10    "too small" notice (w<5 or h<6)                fallback
-    //    9    board (6 word rows, 1 tall each)        6         6
-    //    8    footer, 1 line                          1         7
-    //    7    keyboard (3 key rows)                   3        10
-    //    6    footer, 2nd line (message + controls)   1        11
-    //    5    gaps between board rows                 5        16
-    //    4    cell inner padding (rows to CELL_H)    12        28
-    //    3    title                                   1        29
-    //    2    gaps between keyboard rows              2        31
-    //    1    gaps between the four sections         rest
+    // Below a usable minimum, point at the axis that's too small instead of drawing a
+    // broken layout. Dimensionless messages need no formatting and stay correct whatever
+    // WORD_LEN / MAX_GUESSES are.
     if w < MINI_W || h < MINI_H {
-        // MINI_W=5, MINI_H=6 — hardcoded to avoid pulling in formatting machinery.
-        const MSG: &[u8] = b"Terminal too small. Must be at least 5x6.";
-        grid.text(0, 0, MSG, Color::Reset, Color::Reset, false);
+        let msg: &[u8] = if w < MINI_W {
+            b"Terminal too narrow."
+        } else {
+            b"Terminal too short."
+        };
+        grid.text(0, 0, msg, Color::Reset, Color::Reset, false);
         return grid;
     }
 
-    let footer1 = h >= 7;
-    let keyboard = h >= 10;
-    let footer2 = h >= 11;
-    let board_gaps = h >= 16;
-    let cell_pad = h >= 28;
-    let title = h >= 29;
-    let kb_gaps = h >= 31;
+    // Turn features on as height allows (see the MIN_H_* budget). Any rows left once the
+    // highest affordable feature is on become the gaps spread between the sections.
+    let footer1 = h >= MIN_H_FOOTER_1;
+    let keyboard = h >= MIN_H_KEYBOARD;
+    let footer2 = h >= MIN_H_FOOTER_2;
+    let board_gaps = h >= MIN_H_BOARD_GAPS;
+    let cell_pad = h >= MIN_H_CELL_PAD;
+    let title = h >= MIN_H_TITLE;
+    let kb_gaps = h >= MIN_H_KB_GAPS;
 
     let cell_h = if cell_pad { CELL_H } else { KEY_H };
     let bgap = board_gaps as usize;
@@ -456,33 +481,33 @@ pub fn build_grid(w: usize, h: usize, app: &App) -> Grid {
     let title_h = title as usize;
     let footer_h = footer1 as usize + footer2 as usize;
 
-    // Collect the present sections in top-to-bottom order, then let stack_sizes
-    // spread the remaining rows as gaps between them (Flex::SpaceBetween).
-    let mut tags = [0u8; 4];
-    let mut sizes = [0usize; 4];
+    // Keep only the bands that earned a slot, preserving top-to-bottom order.
+    let mut sections = [Section::Title; SECTION_COUNT];
+    let mut sizes = [0usize; SECTION_COUNT];
     let mut n = 0;
-    let mut push = |tag: u8, size: usize| {
+    for (section, size) in [
+        (Section::Title, title_h),
+        (Section::Board, board_h),
+        (Section::Keyboard, kb_h),
+        (Section::Footer, footer_h),
+    ] {
         if size > 0 {
-            tags[n] = tag;
+            sections[n] = section;
             sizes[n] = size;
             n += 1;
         }
-    };
-    push(S_TITLE, title_h);
-    push(S_BOARD, board_h);
-    push(S_KEYBOARD, kb_h);
-    push(S_FOOTER, footer_h);
+    }
 
-    let mut starts = [0usize; 4];
+    // Whatever rows are left over become even gaps between the bands.
+    let mut starts = [0usize; SECTION_COUNT];
     stack_sizes(&sizes[..n], h, &mut starts[..n]);
 
-    for i in 0..n {
-        let y = starts[i];
-        match tags[i] {
-            S_TITLE => draw_title(&mut grid, 0, y, w),
-            S_BOARD => draw_board(&mut grid, app, y, w, cell_h, bgap),
-            S_KEYBOARD => draw_keyboard(&mut grid, app, y, w, kgap),
-            _ => draw_footer(&mut grid, app, 0, y, w, footer_h),
+    for (&section, &y) in sections[..n].iter().zip(&starts[..n]) {
+        match section {
+            Section::Title => draw_title(&mut grid, 0, y, w),
+            Section::Board => draw_board(&mut grid, app, y, w, cell_h, bgap),
+            Section::Keyboard => draw_keyboard(&mut grid, app, y, w, kgap),
+            Section::Footer => draw_footer(&mut grid, app, 0, y, w, footer_h),
         }
     }
 
@@ -528,49 +553,4 @@ pub fn render<W: Write>(out: &mut W, grid: &Grid) -> std::io::Result<()> {
     }
     queue!(out, SetAttribute(Attribute::Reset))?;
     out.flush()
-}
-
-// ----------------------------------------------------------------------------
-// Test dump (glyph / bg / fg layers) matching the reference snapshot format.
-// ----------------------------------------------------------------------------
-
-#[cfg(test)]
-pub fn dump_grid(w: u16, h: u16, app: &App) -> String {
-    fn code(c: Color) -> char {
-        match c {
-            Color::Reset => '.',
-            Color::White => 'w',
-            Color::DarkGreen => 'G',
-            Color::DarkYellow => 'Y',
-            Color::Grey => 'g',
-            Color::DarkGrey => 'd',
-            Color::DarkRed => 'r',
-            _ => '?',
-        }
-    }
-    let grid = build_grid(w as usize, h as usize, app);
-    let mut out = String::new();
-    for layer in 0..3 {
-        for y in 0..grid.h {
-            for x in 0..grid.w {
-                let i = y * grid.w + x;
-                let ch = match layer {
-                    0 => {
-                        let b = grid.ch[i];
-                        if b == 0 {
-                            ' '
-                        } else {
-                            b as char
-                        }
-                    }
-                    1 => code(grid.bg[i]),
-                    _ => code(grid.fg[i]),
-                };
-                out.push(ch);
-            }
-            out.push('\n');
-        }
-        out.push_str("----\n");
-    }
-    out
 }

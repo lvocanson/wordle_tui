@@ -11,10 +11,12 @@ use crossterm::terminal::{
 use crossterm::{cursor, execute, queue};
 
 mod app;
+mod codec;
 mod game;
 mod ui;
 
 use app::{App, Phase};
+use ui::Action;
 
 fn init_terminal() -> io::Result<Stdout> {
     enable_raw_mode()?;
@@ -87,8 +89,7 @@ fn run(out: &mut Stdout) -> io::Result<()> {
                 }
                 Event::Mouse(m) => {
                     if let MouseEventKind::Down(MouseButton::Left) = m.kind {
-                        let action = grid.hit_test(m.column as usize, m.row as usize);
-                        if action != 0 {
+                        if let Some(action) = grid.hit_test(m.column as usize, m.row as usize) {
                             dirty = true;
                             handle_action(&mut app, action);
                         }
@@ -107,17 +108,16 @@ fn run(out: &mut Stdout) -> io::Result<()> {
     Ok(())
 }
 
-// Dispatch a clicked region (letter byte, or ACT_BACK / ACT_ENTER) like a keypress.
-fn handle_action(app: &mut App, action: u8) {
+// Replay a click on a key or button as the equivalent keypress.
+fn handle_action(app: &mut App, action: Action) {
     match app.phase {
         Phase::Playing => match action {
-            ui::ACT_BACK => app.backspace(),
-            ui::ACT_ENTER => app.submit(),
-            l if l.is_ascii_alphabetic() => app.type_letter(l),
-            _ => {}
+            Action::Back => app.backspace(),
+            Action::Enter => app.submit(),
+            Action::Letter(l) => app.type_letter(l),
         },
         Phase::Won | Phase::Lost => {
-            if action == ui::ACT_ENTER {
+            if action == Action::Enter {
                 *app = App::new();
             }
         }
