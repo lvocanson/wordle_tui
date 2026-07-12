@@ -3,8 +3,7 @@ use std::io::Write;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::Color;
 
-use crate::app::App;
-use crate::game::{LetterState, Phase, MAX_GUESSES};
+use crate::game::{Game, LetterState, Score, MAX_GUESSES};
 use crate::words::WORD_LEN;
 
 const CELL_W: usize = 7;
@@ -189,10 +188,8 @@ fn stack_sizes(sizes: &[usize], len: usize, out: &mut [usize]) {
 // ----------------------------------------------------------------------------
 
 enum CellColor {
-    Empty,
-    Draft,
     Keyboard,
-    Submitted(LetterState),
+    Board(LetterState),
 }
 
 // Background palette (24-bit). Empty cells are near-black; a draft cell (holds a typed letter
@@ -207,12 +204,12 @@ const ABSENT_BG: Color = Color::Rgb { r: 58, g: 58, b: 60 };
 
 fn cell_bg_color(c: &CellColor) -> Color {
     match c {
-        CellColor::Empty => EMPTY_BG,
-        CellColor::Draft => DRAFT_BG,
         CellColor::Keyboard => KEY_BG,
-        CellColor::Submitted(LetterState::Correct) => CORRECT_BG,
-        CellColor::Submitted(LetterState::Misplaced) => MISPLACED_BG,
-        CellColor::Submitted(LetterState::Absent) => ABSENT_BG,
+        CellColor::Board(LetterState::Empty) => EMPTY_BG,
+        CellColor::Board(LetterState::Draft) => DRAFT_BG,
+        CellColor::Board(LetterState::Submitted(Score::Correct)) => CORRECT_BG,
+        CellColor::Board(LetterState::Submitted(Score::Misplaced)) => MISPLACED_BG,
+        CellColor::Board(LetterState::Submitted(Score::Absent)) => ABSENT_BG,
     }
 }
 
@@ -274,58 +271,23 @@ fn draw_footer(grid: &mut Grid, message: Option<&str>, controls: &str, x: usize,
 
 // Vertical geometry (cell height `cell_h`, row gap `vgap`, y position) comes from the
 // caller's budget; columns follow the shared `col_budget` (interior > gaps > center).
-fn draw_board(grid: &mut Grid, app: &App, y: usize, w: usize, cell_h: usize, vgap: usize) {
+fn draw_board(grid: &mut Grid, game: &Game, y: usize, w: usize, cell_h: usize, vgap: usize) {
     let (cell_w, hgap, bx) = col_budget(w, WORD_LEN, CELL_W);
-    let guesses = app.game.guesses();
-    let draft_row = guesses.len();
 
     for word_idx in 0..MAX_GUESSES {
+        let guess = game.board()[word_idx];
         let ry = y + word_idx * (cell_h + vgap);
         for cell_idx in 0..WORD_LEN {
             let cx = bx + cell_idx * (cell_w + hgap);
-            let (letter, status) = if word_idx < guesses.len() {
-                let guess = &guesses[word_idx];
-                (guess.word[cell_idx], CellColor::Submitted(guess.result[cell_idx]))
-            } else if word_idx == draft_row
-                && app.phase() == Phase::Playing
-                && cell_idx < app.draft_len
-            {
-                (app.draft[cell_idx], CellColor::Draft)
-            } else {
-                (b' ', CellColor::Empty)
-            };
-            draw_cell(grid, cx, ry, cell_w, cell_h, letter, status);
+            draw_cell(grid, cx, ry, cell_w, cell_h, guess.word[cell_idx], CellColor::Board(guess.result[cell_idx]));
         }
-    }
-}
-
-fn keyboard_letter_states(app: &App) -> [Option<LetterState>; 26] {
-    let mut states = [None; 26];
-    for guess in app.game.guesses() {
-        for (&letter, &state) in guess.word.iter().zip(guess.result.iter()) {
-            let idx = (letter - b'a') as usize;
-            states[idx] = Some(match states[idx] {
-                Some(existing) => better_state(existing, state),
-                None => state,
-            });
-        }
-    }
-    states
-}
-
-fn better_state(a: LetterState, b: LetterState) -> LetterState {
-    use LetterState::*;
-    match (a, b) {
-        (Correct, _) | (_, Correct) => Correct,
-        (Misplaced, _) | (_, Misplaced) => Misplaced,
-        _ => Absent,
     }
 }
 
 // Draw one keyboard row of letters starting at (x, y), registering each key as clickable.
 fn draw_keys(
     grid: &mut Grid,
-    states: &[Option<LetterState>; 26],
+    game: &Game,
     row: &str,
     x: usize,
     y: usize,
@@ -333,9 +295,9 @@ fn draw_keys(
     hgap: usize,
 ) {
     for (j, letter) in row.bytes().enumerate() {
-        let color = match states[(letter - b'a') as usize] {
-            Some(state) => CellColor::Submitted(state),
+        let color = match game.get_letter_state(letter) {
             None => CellColor::Keyboard,
+            Some(s) => CellColor::Board(LetterState::Submitted(s)),
         };
         let key_x = x + j * (key_w + hgap);
         draw_cell(grid, key_x, y, key_w, 1, letter, color);
@@ -344,8 +306,7 @@ fn draw_keys(
     }
 }
 
-fn draw_keyboard(grid: &mut Grid, app: &App, y: usize, w: usize, vgap: usize) {
-    let states = keyboard_letter_states(app);
+fn draw_keyboard(grid: &mut Grid, game: &Game, y: usize, w: usize, vgap: usize) {
     let (key_w, hgap, _) = col_budget(w, KB_COLS, KEY_W);
 
     let last = KEYBOARD_ROWS.len() - 1;
@@ -379,15 +340,15 @@ fn draw_keyboard(grid: &mut Grid, app: &App, y: usize, w: usize, vgap: usize) {
             };
             let enter_key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
             let back_key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
-            draw_button(grid, start, row_y, bw, enter, enter_key);
             let letters_x = start + bw + sep;
-            draw_keys(grid, &states, row, letters_x, row_y, key_w, hgap);
+            draw_button(grid, start, row_y, bw, enter, enter_key);
+            draw_keys(grid, game, row, letters_x, row_y, key_w, hgap);
             draw_button(grid, letters_x + letters_w + sep, row_y, bw, back, back_key);
         } else {
             let row_w = row.len() * key_w + (row.len() - 1) * hgap;
             draw_keys(
                 grid,
-                &states,
+                game,
                 row,
                 kx + center(kb_w, row_w),
                 row_y,
@@ -423,7 +384,7 @@ enum Section {
     Footer,
 }
 
-pub fn build_grid(w: usize, h: usize, app: &App) -> Grid {
+pub fn build_grid(w: usize, h: usize, game: &Game, message: Option<&str>, controls: &str) -> Grid {
     let mut grid = Grid::new(w, h);
 
     // Below a usable minimum, point at the axis that's too small instead of drawing a
@@ -487,10 +448,10 @@ pub fn build_grid(w: usize, h: usize, app: &App) -> Grid {
     for (&section, &y) in sections[..n].iter().zip(&starts[..n]) {
         match section {
             Section::Title => draw_title(&mut grid, 0, y, w),
-            Section::Board => draw_board(&mut grid, app, y, w, cell_h, bgap),
-            Section::Keyboard => draw_keyboard(&mut grid, app, y, w, kgap),
+            Section::Board => draw_board(&mut grid, game, y, w, cell_h, bgap),
+            Section::Keyboard => draw_keyboard(&mut grid, game, y, w, kgap),
             Section::Footer => {
-                draw_footer(&mut grid, app.message.as_deref(), app.controls, 0, y, w, footer_h)
+                draw_footer(&mut grid, message, controls, 0, y, w, footer_h)
             }
         }
     }
