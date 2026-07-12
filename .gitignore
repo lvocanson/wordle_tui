@@ -1,4 +1,4 @@
 /target
-# Reference snapshots are generated locally (see src/snapshot_tests.rs), not committed.
-/snapshots
-/snapshots_got
+
+# Claude Code local/session artifacts (personal settings, worktrees).
+/.claude

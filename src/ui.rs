@@ -1,5 +1,6 @@
 use std::io::Write;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::Color;
 
 use crate::app::{App, Phase};
@@ -38,15 +39,6 @@ const MIN_H_KB_GAPS: usize = MIN_H_TITLE + (KEYBOARD_ROWS.len() - 1); // 31: gap
 // The incremental budget must reach exactly the fully-expanded layout height.
 const _: () = assert!(MIN_H_KB_GAPS == REQ_VERT);
 
-// What clicking a cell does. The whole area of every key and button is tagged with one
-// of these so a click can be replayed as if it were the equivalent keypress.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Action {
-    Letter(u8),
-    Back,
-    Enter,
-}
-
 const BTN_W: usize = 5; // full ENTER / BACK buttons flanking the bottom row
 const BTN_W_MIN: usize = 3; // degraded (E) / (B) buttons
 
@@ -63,7 +55,9 @@ pub struct Grid {
     characters: Vec<u8>,
     foreground_colors: Vec<Color>,
     background_colors: Vec<Color>,
-    hit_actions: Vec<Option<Action>>,
+    // The keypress each cell replays when clicked. Every key and button tags its whole
+    // area so a click can be dispatched through the exact same path as a real keypress.
+    hit_keys: Vec<Option<KeyEvent>>,
 }
 
 impl Grid {
@@ -74,26 +68,26 @@ impl Grid {
             characters: vec![b' '; w * h],
             foreground_colors: vec![Color::Reset; w * h],
             background_colors: vec![Color::Reset; w * h],
-            hit_actions: vec![None; w * h],
+            hit_keys: vec![None; w * h],
         }
     }
 
-    // Tag a rectangle of cells with a click action for later hit-testing.
-    fn hit_rect(&mut self, x: usize, y: usize, w: usize, h: usize, action: Action) {
+    // Tag a rectangle of cells with the keypress a click there replays, for later hit-testing.
+    fn hit_rect(&mut self, x: usize, y: usize, w: usize, h: usize, key: KeyEvent) {
         for dy in 0..h {
             for dx in 0..w {
                 let (px, py) = (x + dx, y + dy);
                 if px < self.width && py < self.height {
-                    self.hit_actions[py * self.width + px] = Some(action);
+                    self.hit_keys[py * self.width + px] = Some(key);
                 }
             }
         }
     }
 
-    // The action registered at a screen cell, if any (out-of-bounds reads as None).
-    pub fn hit_test(&self, x: usize, y: usize) -> Option<Action> {
+    // The keypress registered at a screen cell, if any (out-of-bounds reads as None).
+    pub fn hit_test(&self, x: usize, y: usize) -> Option<KeyEvent> {
         if x < self.width && y < self.height {
-            self.hit_actions[y * self.width + x]
+            self.hit_keys[y * self.width + x]
         } else {
             None
         }
@@ -334,7 +328,8 @@ fn draw_keys(
         };
         let key_x = x + j * (key_w + hgap);
         draw_cell(grid, key_x, y, key_w, 1, letter, color);
-        grid.hit_rect(key_x, y, key_w, 1, Action::Letter(letter));
+        let event = KeyEvent::new(KeyCode::Char(letter as char), KeyModifiers::NONE);
+        grid.hit_rect(key_x, y, key_w, 1, event);
     }
 }
 
@@ -371,10 +366,12 @@ fn draw_keyboard(grid: &mut Grid, app: &App, ky: usize, w: usize, vgap: usize) {
             } else {
                 (b"(E)", b"(B)")
             };
-            draw_button(grid, start, row_y, bw, enter, Action::Enter);
+            let enter_key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+            let back_key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+            draw_button(grid, start, row_y, bw, enter, enter_key);
             let letters_x = start + bw + sep;
             draw_keys(grid, &states, row, letters_x, row_y, key_w, hgap);
-            draw_button(grid, letters_x + letters_w + sep, row_y, bw, back, Action::Back);
+            draw_button(grid, letters_x + letters_w + sep, row_y, bw, back, back_key);
         } else {
             let row_w = row.len() * key_w + (row.len() - 1) * hgap;
             draw_keys(
@@ -391,14 +388,14 @@ fn draw_keyboard(grid: &mut Grid, app: &App, ky: usize, w: usize, vgap: usize) {
 }
 
 // A grey labelled button that also registers its whole area as clickable.
-fn draw_button(grid: &mut Grid, x: usize, y: usize, w: usize, label: &[u8], action: Action) {
+fn draw_button(grid: &mut Grid, x: usize, y: usize, w: usize, label: &[u8], key: KeyEvent) {
     let bg = cell_bg_color(&CellColor::Keyboard);
     for dx in 0..w {
         grid.set(x + dx, y, b' ', bg, bg);
     }
     let off = w.saturating_sub(label.len()) / 2;
     grid.text(x + off, y, label, Color::White, bg);
-    grid.hit_rect(x, y, w, 1, action);
+    grid.hit_rect(x, y, w, 1, key);
 }
 
 // ----------------------------------------------------------------------------

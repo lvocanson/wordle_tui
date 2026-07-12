@@ -2,8 +2,8 @@ use std::io::{self, Stdout};
 use std::time::Duration;
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::terminal::{
     self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
@@ -16,7 +16,6 @@ mod game;
 mod ui;
 
 use app::{App, Phase};
-use ui::Action;
 
 fn init_terminal() -> io::Result<Stdout> {
     enable_raw_mode()?;
@@ -64,32 +63,19 @@ fn run(out: &mut Stdout) -> io::Result<()> {
                         continue;
                     }
                     dirty = true;
-
-                    match app.phase {
-                        Phase::Playing => match key.code {
-                            KeyCode::Esc => break,
-                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                break
-                            }
-                            KeyCode::Char(c) if c.is_ascii_alphabetic() => {
-                                app.type_letter(c.to_ascii_lowercase() as u8)
-                            }
-                            KeyCode::Backspace => app.backspace(),
-                            KeyCode::Enter => app.submit(),
-                            _ => {}
-                        },
-                        Phase::Won | Phase::Lost => match key.code {
-                            KeyCode::Enter => app = App::new(),
-                            KeyCode::Esc => break,
-                            _ => {}
-                        },
+                    if handle_key(&mut app, key) {
+                        break;
                     }
                 }
                 Event::Mouse(m) => {
+                    // A click on a key/button hit-tests to the keypress it stands for, then
+                    // runs through the exact same path as a real keypress.
                     if let MouseEventKind::Down(MouseButton::Left) = m.kind {
-                        if let Some(action) = grid.hit_test(m.column as usize, m.row as usize) {
+                        if let Some(key) = grid.hit_test(m.column as usize, m.row as usize) {
                             dirty = true;
-                            handle_action(&mut app, action);
+                            if handle_key(&mut app, key) {
+                                break;
+                            }
                         }
                     }
                 }
@@ -106,20 +92,26 @@ fn run(out: &mut Stdout) -> io::Result<()> {
     Ok(())
 }
 
-// Replay a click on a key or button as the equivalent keypress.
-fn handle_action(app: &mut App, action: Action) {
+// Apply one keypress (typed or replayed from a click). Returns true when it asks to quit.
+fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     match app.phase {
-        Phase::Playing => match action {
-            Action::Back => app.backspace(),
-            Action::Enter => app.submit(),
-            Action::Letter(l) => app.type_letter(l),
-        },
-        Phase::Won | Phase::Lost => {
-            if action == Action::Enter {
-                *app = App::new();
+        Phase::Playing => match key.code {
+            KeyCode::Esc => return true,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+            KeyCode::Char(c) if c.is_ascii_alphabetic() => {
+                app.type_letter(c.to_ascii_lowercase() as u8)
             }
-        }
+            KeyCode::Backspace => app.backspace(),
+            KeyCode::Enter => app.submit(),
+            _ => {}
+        },
+        Phase::Won | Phase::Lost => match key.code {
+            KeyCode::Enter => *app = App::new(),
+            KeyCode::Esc => return true,
+            _ => {}
+        },
     }
+    false
 }
 
 fn main() {
