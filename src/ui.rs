@@ -49,26 +49,34 @@ const MINI_H: usize = MAX_GUESSES; // shortest terminal that can show a board
 // Grid model
 // ----------------------------------------------------------------------------
 
+// One screen cell: its glyph, colors, and the keypress a click there replays (the whole
+// area of every key/button is tagged so a click routes through the same path as a keypress).
+#[derive(Clone, Copy)]
+struct Cell {
+    character: u8,
+    foreground_color: Color,
+    background_color: Color,
+    hit_key: Option<KeyEvent>,
+}
+
 pub struct Grid {
     width: usize,
     height: usize,
-    characters: Vec<u8>,
-    foreground_colors: Vec<Color>,
-    background_colors: Vec<Color>,
-    // The keypress each cell replays when clicked. Every key and button tags its whole
-    // area so a click can be dispatched through the exact same path as a real keypress.
-    hit_keys: Vec<Option<KeyEvent>>,
+    cells: Vec<Cell>,
 }
 
 impl Grid {
     fn new(w: usize, h: usize) -> Self {
+        let blank = Cell {
+            character: b' ',
+            foreground_color: Color::Reset,
+            background_color: Color::Reset,
+            hit_key: None,
+        };
         Grid {
             width: w,
             height: h,
-            characters: vec![b' '; w * h],
-            foreground_colors: vec![Color::Reset; w * h],
-            background_colors: vec![Color::Reset; w * h],
-            hit_keys: vec![None; w * h],
+            cells: vec![blank; w * h],
         }
     }
 
@@ -78,7 +86,7 @@ impl Grid {
             for dx in 0..w {
                 let (px, py) = (x + dx, y + dy);
                 if px < self.width && py < self.height {
-                    self.hit_keys[py * self.width + px] = Some(key);
+                    self.cells[py * self.width + px].hit_key = Some(key);
                 }
             }
         }
@@ -87,7 +95,7 @@ impl Grid {
     // The keypress registered at a screen cell, if any (out-of-bounds reads as None).
     pub fn hit_test(&self, x: usize, y: usize) -> Option<KeyEvent> {
         if x < self.width && y < self.height {
-            self.hit_keys[y * self.width + x]
+            self.cells[y * self.width + x].hit_key
         } else {
             None
         }
@@ -95,10 +103,10 @@ impl Grid {
 
     fn set(&mut self, x: usize, y: usize, ch: u8, fg: Color, bg: Color) {
         if x < self.width && y < self.height {
-            let i = y * self.width + x;
-            self.characters[i] = ch;
-            self.foreground_colors[i] = fg;
-            self.background_colors[i] = bg;
+            let cell = &mut self.cells[y * self.width + x];
+            cell.character = ch;
+            cell.foreground_color = fg;
+            cell.background_color = bg;
         }
     }
 
@@ -498,12 +506,11 @@ pub fn render<W: Write>(out: &mut W, grid: &Grid) -> std::io::Result<()> {
         queue!(out, MoveTo(0, y as u16))?;
         let mut x = 0;
         while x < grid.width {
-            let i = y * grid.width + x;
-            let (fg, bg) = (grid.foreground_colors[i], grid.background_colors[i]);
-            let start = i;
+            let start = y * grid.width + x;
+            let (fg, bg) = (grid.cells[start].foreground_color, grid.cells[start].background_color);
             while x < grid.width {
-                let j = y * grid.width + x;
-                if grid.foreground_colors[j] != fg || grid.background_colors[j] != bg {
+                let cell = &grid.cells[y * grid.width + x];
+                if cell.foreground_color != fg || cell.background_color != bg {
                     break;
                 }
                 x += 1;
@@ -513,8 +520,12 @@ pub fn render<W: Write>(out: &mut W, grid: &Grid) -> std::io::Result<()> {
                 SetForegroundColor(fg),
                 SetBackgroundColor(bg)
             )?;
+            // AoS storage interleaves glyphs, so the run is emitted cell by cell rather than
+            // as one contiguous slice. Bytes go through the buffered writer, not per syscall.
             // All glyphs are ASCII, so the raw bytes are valid UTF-8 for the terminal.
-            out.write_all(&grid.characters[start..y * grid.width + x])?;
+            for cell in &grid.cells[start..y * grid.width + x] {
+                out.write_all(&[cell.character])?;
+            }
         }
     }
     queue!(out, SetAttribute(Attribute::Reset))?;
