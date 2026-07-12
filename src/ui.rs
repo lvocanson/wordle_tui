@@ -3,8 +3,9 @@ use std::io::Write;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::Color;
 
-use crate::app::{App, Phase};
-use crate::game::{LetterState, MAX_GUESSES, WORD_LEN};
+use crate::app::App;
+use crate::game::{LetterState, Phase, MAX_GUESSES};
+use crate::words::WORD_LEN;
 
 const CELL_W: usize = 7;
 const CELL_H: usize = 3;
@@ -126,8 +127,8 @@ fn div_round(a: usize, b: usize) -> usize {
 // Spread `extra` leftover rows/columns into the `n - 1` gaps between `n` items so the
 // items sit flush at both ends and the gaps differ by at most one — the discrete
 // equivalent of placing each item at its evenly-spaced ideal position.
-fn gaps(n: usize, extra: usize) -> [usize; MAX_GUESSES] {
-    let mut g = [0usize; MAX_GUESSES];
+fn gaps(n: usize, extra: usize) -> [usize; SECTION_COUNT] {
+    let mut g = [0usize; SECTION_COUNT];
     if n <= 1 {
         return g;
     }
@@ -239,13 +240,13 @@ fn draw_cell(grid: &mut Grid, x: usize, y: usize, w: usize, h: usize, letter: u8
 // ----------------------------------------------------------------------------
 
 fn draw_title(grid: &mut Grid, x: usize, y: usize, w: usize) {
-    const T: &[u8] = b"- Wordle -";
-    let off = w.saturating_sub(T.len()) / 2; // center the title over the whole width
-    grid.text(x + off, y, T, Color::Reset, Color::Reset);
+    const TITLE: &[u8] = b"- Wordle -";
+    let off = w.saturating_sub(TITLE.len()) / 2; // center the title over the whole width
+    grid.text(x + off, y, TITLE, Color::Reset, Color::Reset);
 }
 
-fn draw_footer(grid: &mut Grid, app: &App, x: usize, y: usize, w: usize, h: usize) {
-    let msg = app.message.as_deref().unwrap_or("");
+fn draw_footer(grid: &mut Grid, message: Option<&str>, controls: &str, x: usize, y: usize, w: usize, h: usize) {
+    let msg = message.unwrap_or("");
     // Center each line, and clip it to the band so an over-long message can't spill
     // past the right edge into neighbouring cells.
     let put = |grid: &mut Grid, row: usize, s: &str, fg: Color| {
@@ -261,33 +262,35 @@ fn draw_footer(grid: &mut Grid, app: &App, x: usize, y: usize, w: usize, h: usiz
     };
     if h >= FOOTER_H {
         put(grid, y, msg, Color::DarkRed);
-        put(grid, y + 1, app.controls, Color::Reset);
+        put(grid, y + 1, controls, Color::Reset);
     } else if h >= 1 {
-        if app.message.is_some() {
+        if message.is_some() {
             put(grid, y, msg, Color::DarkRed);
         } else {
-            put(grid, y, app.controls, Color::Reset);
+            put(grid, y, controls, Color::Reset);
         }
     }
 }
 
 // Vertical geometry (cell height `cell_h`, row gap `vgap`, y position) comes from the
 // caller's budget; columns follow the shared `col_budget` (interior > gaps > center).
-fn draw_board(grid: &mut Grid, app: &App, by: usize, w: usize, cell_h: usize, vgap: usize) {
+fn draw_board(grid: &mut Grid, app: &App, y: usize, w: usize, cell_h: usize, vgap: usize) {
     let (cell_w, hgap, bx) = col_budget(w, WORD_LEN, CELL_W);
+    let guesses = app.game.guesses();
+    let draft_row = guesses.len();
 
     for word_idx in 0..MAX_GUESSES {
-        let ry = by + word_idx * (cell_h + vgap);
+        let ry = y + word_idx * (cell_h + vgap);
         for cell_idx in 0..WORD_LEN {
             let cx = bx + cell_idx * (cell_w + hgap);
-            let (letter, status) = if word_idx < app.input_idx {
-                let (word, result) = &app.history[word_idx];
-                (word[cell_idx], CellColor::Submitted(result[cell_idx]))
-            } else if word_idx == app.input_idx
-                && app.phase == Phase::Playing
-                && cell_idx < app.input_len
+            let (letter, status) = if word_idx < guesses.len() {
+                let guess = &guesses[word_idx];
+                (guess.word[cell_idx], CellColor::Submitted(guess.result[cell_idx]))
+            } else if word_idx == draft_row
+                && app.phase() == Phase::Playing
+                && cell_idx < app.draft_len
             {
-                (app.history[app.input_idx].0[cell_idx], CellColor::Draft)
+                (app.draft[cell_idx], CellColor::Draft)
             } else {
                 (b' ', CellColor::Empty)
             };
@@ -298,8 +301,8 @@ fn draw_board(grid: &mut Grid, app: &App, by: usize, w: usize, cell_h: usize, vg
 
 fn keyboard_letter_states(app: &App) -> [Option<LetterState>; 26] {
     let mut states = [None; 26];
-    for (word, result) in &app.history[..app.input_idx] {
-        for (&letter, &state) in word.iter().zip(result.iter()) {
+    for guess in app.game.guesses() {
+        for (&letter, &state) in guess.word.iter().zip(guess.result.iter()) {
             let idx = (letter - b'a') as usize;
             states[idx] = Some(match states[idx] {
                 Some(existing) => better_state(existing, state),
@@ -341,7 +344,7 @@ fn draw_keys(
     }
 }
 
-fn draw_keyboard(grid: &mut Grid, app: &App, ky: usize, w: usize, vgap: usize) {
+fn draw_keyboard(grid: &mut Grid, app: &App, y: usize, w: usize, vgap: usize) {
     let states = keyboard_letter_states(app);
     let (key_w, hgap, _) = col_budget(w, KB_COLS, KEY_W);
 
@@ -366,7 +369,7 @@ fn draw_keyboard(grid: &mut Grid, app: &App, ky: usize, w: usize, vgap: usize) {
     let kx = center(w, kb_w);
 
     for (row_idx, row) in KEYBOARD_ROWS.iter().enumerate() {
-        let row_y = ky + row_idx * (KEY_H + vgap);
+        let row_y = y + row_idx * (KEY_H + vgap);
         if row_idx == last {
             let start = kx + center(kb_w, bottom_w);
             let (enter, back): (&[u8], &[u8]) = if bw == BTN_W {
@@ -438,9 +441,9 @@ pub fn build_grid(w: usize, h: usize, app: &App) -> Grid {
 
     // Turn features on as height allows (see the MIN_H_* budget). Any rows left once the
     // highest affordable feature is on become the gaps spread between the sections.
-    let footer1 = h >= MIN_H_FOOTER_1;
+    let footer_message = h >= MIN_H_FOOTER_1;
     let keyboard = h >= MIN_H_KEYBOARD;
-    let footer2 = h >= MIN_H_FOOTER_2;
+    let footer_controls = h >= MIN_H_FOOTER_2;
     let board_gaps = h >= MIN_H_BOARD_GAPS;
     let cell_pad = h >= MIN_H_CELL_PAD;
     let title = h >= MIN_H_TITLE;
@@ -458,7 +461,7 @@ pub fn build_grid(w: usize, h: usize, app: &App) -> Grid {
     };
 
     let title_h = title as usize;
-    let footer_h = footer1 as usize + footer2 as usize;
+    let footer_h = footer_message as usize + footer_controls as usize;
 
     // Keep only the bands that earned a slot, preserving top-to-bottom order.
     let mut sections = [Section::Title; SECTION_COUNT];
@@ -486,7 +489,9 @@ pub fn build_grid(w: usize, h: usize, app: &App) -> Grid {
             Section::Title => draw_title(&mut grid, 0, y, w),
             Section::Board => draw_board(&mut grid, app, y, w, cell_h, bgap),
             Section::Keyboard => draw_keyboard(&mut grid, app, y, w, kgap),
-            Section::Footer => draw_footer(&mut grid, app, 0, y, w, footer_h),
+            Section::Footer => {
+                draw_footer(&mut grid, app.message.as_deref(), app.controls, 0, y, w, footer_h)
+            }
         }
     }
 
@@ -515,6 +520,7 @@ pub fn render<W: Write>(out: &mut W, grid: &Grid) -> std::io::Result<()> {
                 }
                 x += 1;
             }
+            let end = y * grid.width + x;
             queue!(
                 out,
                 SetForegroundColor(fg),
@@ -523,7 +529,7 @@ pub fn render<W: Write>(out: &mut W, grid: &Grid) -> std::io::Result<()> {
             // AoS storage interleaves glyphs, so the run is emitted cell by cell rather than
             // as one contiguous slice. Bytes go through the buffered writer, not per syscall.
             // All glyphs are ASCII, so the raw bytes are valid UTF-8 for the terminal.
-            for cell in &grid.cells[start..y * grid.width + x] {
+            for cell in &grid.cells[start..end] {
                 out.write_all(&[cell.character])?;
             }
         }

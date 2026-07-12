@@ -46,15 +46,15 @@ fn main() {
     valid.dedup();
     let answer_count = answers.len();
 
-    // Merge into one sorted union, tagging each word as an answer (colour A) or valid-only.
-    let union: Vec<(Vec<u8>, bool)> = merge_words(answers, valid)
+    // Merge into one sorted corpus, tagging each word as an answer (colour A) or valid-only.
+    let corpus: Vec<(Vec<u8>, bool)> = merge_words(answers, valid)
         .map(|w| (w.word.symbols(), matches!(w.kind, WordKind::Answer)))
         .collect();
 
-    let (order, inc, blob) = best_model(&union, answer_count as u32, word_len);
+    let (order, inc, blob) = best_model(&corpus, answer_count as u32, word_len);
 
-    fs::write(out.join("union.bin"), &blob)
-        .unwrap_or_else(|e| panic!("cannot write union.bin: {e}"));
+    fs::write(out.join("corpus.bin"), &blob)
+        .unwrap_or_else(|e| panic!("cannot write corpus.bin: {e}"));
     fs::write(
         out.join("constants.rs"),
         format!(
@@ -63,7 +63,7 @@ fn main() {
              pub const ANSWER_COUNT: usize = {answer_count};\n\
              pub const ORDER: usize = {order};\n\
              pub const INC: u16 = {inc};\n",
-            union.len(),
+            corpus.len(),
         ),
     )
     .unwrap_or_else(|e| panic!("cannot write constants.rs: {e}"));

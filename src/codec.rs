@@ -4,7 +4,7 @@
 // is what guarantees encode and decode agree bit for bit — any divergence would silently
 // corrupt the stream.
 //
-// The two word lists are merged into one sorted, distinct union (answers + valid extensions)
+// The two word lists are merged into one sorted, distinct corpus (answers + valid extensions)
 // and encoded in a single pass. Three sources of redundancy are each targeted directly:
 //   * the sort makes the ordering free, and lets consecutive words share a prefix
 //     (front-coding: we only encode the suffix that differs);
@@ -101,7 +101,7 @@ impl<'a> RangeDecoder<'a> {
     }
 
     // Returns a cumulative-frequency point in 0..tot to be looked up in the model.
-    // Both divisions below panic ONLY on a corrupt `union.bin`: `tot` is always > 0 with intact
+    // Both divisions below panic ONLY on a corrupt `corpus.bin`: `tot` is always > 0 with intact
     // data (every caller feeds a total whose add-one smoothing floors it at >= 1; `char_tot`'s
     // `lo` can reach 26 — an empty, zero total — only if a word's first differing char exceeds
     // 'z', which the sort forbids), and `range >= TOP` is held by the renorm loops while every
@@ -305,4 +305,19 @@ pub fn decode_word(dec: &mut RangeDecoder, m: &mut Model, prev: Option<&[u8]>, w
         m.update(ctx, sym);
     }
     w
+}
+
+// Decode the colour bit that follows each word: true = colour A. Sampling without replacement,
+// so the probability tracks the counts still to be placed — `remaining` words in all, of which
+// `remaining_a` are colour A. Both counts are decremented as the caller walks the stream.
+pub fn decode_color(dec: &mut RangeDecoder, remaining: &mut u32, remaining_a: &mut u32) -> bool {
+    let is_a = dec.decode_freq(*remaining) < *remaining_a;
+    if is_a {
+        dec.decode_update(0, *remaining_a);
+        *remaining_a -= 1;
+    } else {
+        dec.decode_update(*remaining_a, *remaining - *remaining_a);
+    }
+    *remaining -= 1;
+    is_a
 }

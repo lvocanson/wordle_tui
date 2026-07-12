@@ -3,7 +3,7 @@
 //! Two reports in one place, both kept off the build path so a normal `cargo build` stays quiet:
 //!
 //! 1. **Compression** — reads the build script's own outputs (the generated `constants.rs` and the
-//!    packed `union.bin`, located through the package's `OUT_DIR` exactly as `src/game.rs` does)
+//!    packed `corpus.bin`, located through the package's `OUT_DIR` exactly as `src/words.rs` does)
 //!    plus the `res/` sources. This is what used to be the two `cargo::warning=` lines.
 //! 2. **Binary size** — the on-disk size of the built game, and on Windows the un-padded
 //!    `VirtualSize` of each PE section plus their total (the number to compare between size
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 include!(concat!(env!("OUT_DIR"), "/constants.rs"));
 
-const BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/union.bin"));
+const BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/corpus.bin"));
 
 fn main() {
     print_compression();

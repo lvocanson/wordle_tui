@@ -14,8 +14,10 @@ mod app;
 mod codec;
 mod game;
 mod ui;
+mod words;
 
-use app::{App, Phase};
+use app::App;
+use game::Phase;
 
 fn init_terminal() -> io::Result<Stdout> {
     enable_raw_mode()?;
@@ -94,7 +96,7 @@ fn run(out: &mut Stdout) -> io::Result<()> {
 
 // Apply one keypress (typed or replayed from a click). Returns true when it asks to quit.
 fn handle_key(app: &mut App, key: KeyEvent) -> bool {
-    match app.phase {
+    match app.phase() {
         Phase::Playing => match key.code {
             KeyCode::Esc => return true,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,

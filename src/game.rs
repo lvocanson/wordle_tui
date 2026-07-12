@@ -1,15 +1,11 @@
-use std::cmp::Ordering;
-use std::time::{SystemTime, UNIX_EPOCH};
+// The game itself: the rules of Wordle over a single hidden word. `Game` holds strictly the
+// data of a game in progress — the target and the guesses committed so far — and nothing about
+// how it is drawn or how input is edited (that lives in app.rs / ui.rs). Which strings count as
+// words is the word database's job (words.rs).
 
-use crate::codec::{decode_word, Model, RangeDecoder};
+use crate::words::{self, WORD_LEN};
 
-include!(concat!(env!("OUT_DIR"), "/constants.rs"));
 pub const MAX_GUESSES: usize = 6;
-
-// The merged, sorted union of both word lists as one arithmetic-coded stream (see codec.rs).
-// It is decoded on demand — every lookup walks the stream from the start, rebuilding the
-// adaptive model as it goes. No word is ever held in a table: the trade is CPU for size.
-static UNION_RAW: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/union.bin"));
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LetterState {
@@ -18,47 +14,73 @@ pub enum LetterState {
     Absent,
 }
 
-// Decode the colour bit that follows each word: true = answer (colour A). Sampling without
-// replacement, so the probability tracks the counts still to be placed.
-fn decode_color(dec: &mut RangeDecoder, remaining: &mut u32, remaining_a: &mut u32) -> bool {
-    let is_a = dec.decode_freq(*remaining) < *remaining_a;
-    if is_a {
-        dec.decode_update(0, *remaining_a);
-        *remaining_a -= 1;
-    } else {
-        dec.decode_update(*remaining_a, *remaining - *remaining_a);
+// A committed guess: the word played and, per letter, how it scored against the target.
+#[derive(Clone, Copy)]
+pub struct Guess {
+    pub word: [u8; WORD_LEN],
+    pub result: [LetterState; WORD_LEN],
+}
+
+// Derived from the guesses, never stored: won once a guess scores all-Correct, lost once the
+// guess budget is spent without a win, playing otherwise.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Phase {
+    Playing,
+    Won,
+    Lost,
+}
+
+pub struct Game {
+    target: [u8; WORD_LEN],
+    guesses: Vec<Guess>,
+}
+
+impl Game {
+    pub fn new() -> Self {
+        Game::with_target(words::pick_target(words::random_seed()))
     }
-    *remaining -= 1;
-    is_a
-}
 
-fn xorshift64(x: u64) -> u64 {
-    let x = x ^ (x << 13);
-    let x = x ^ (x >> 7);
-    x ^ (x << 17)
-}
-
-// Membership test over the union (colour ignored: every word, answer or valid, counts).
-// The union is sorted, so the scan stops as soon as it passes where `word` would be.
-pub fn is_valid(word: &[u8]) -> bool {
-    let target: Vec<u8> = word.iter().map(|b| b - b'a').collect();
-    let mut dec = RangeDecoder::new(UNION_RAW);
-    let mut model = Model::new(WORD_LEN, ORDER, INC);
-    let mut prev: Option<Vec<u8>> = None;
-    let (mut remaining, mut remaining_a) = (WORD_COUNT as u32, ANSWER_COUNT as u32);
-    for _ in 0..WORD_COUNT {
-        let w = decode_word(&mut dec, &mut model, prev.as_deref(), WORD_LEN);
-        decode_color(&mut dec, &mut remaining, &mut remaining_a);
-        match w.cmp(&target) {
-            Ordering::Equal => return true,
-            Ordering::Greater => return false,
-            Ordering::Less => prev = Some(w),
+    fn with_target(target: [u8; WORD_LEN]) -> Self {
+        Game {
+            target,
+            guesses: Vec::new(),
         }
     }
-    false
+
+    // The guesses committed so far, oldest first.
+    pub fn guesses(&self) -> &[Guess] {
+        &self.guesses
+    }
+
+    pub fn target(&self) -> &[u8; WORD_LEN] {
+        &self.target
+    }
+
+    pub fn phase(&self) -> Phase {
+        if self.guesses.last().is_some_and(|g| g.result == [LetterState::Correct; WORD_LEN]) {
+            Phase::Won
+        } else if self.guesses.len() >= MAX_GUESSES {
+            Phase::Lost
+        } else {
+            Phase::Playing
+        }
+    }
+
+    // Validate `word` and, if it is a real word, record it as a guess. Returns whether it was
+    // accepted; a rejected word costs no guess. Caller guarantees the phase is still Playing.
+    pub fn submit(&mut self, word: &[u8; WORD_LEN]) -> bool {
+        if !words::is_valid(word) {
+            return false;
+        }
+        self.guesses.push(Guess {
+            word: *word,
+            result: check(&self.target, word),
+        });
+        true
+    }
 }
 
-pub fn check(target: &[u8], guess: &[u8]) -> [LetterState; WORD_LEN] {
+fn check(target: &[u8], guess: &[u8]) -> [LetterState; WORD_LEN] {
     let mut res = [LetterState::Absent; WORD_LEN];
     let mut used = [false; WORD_LEN];
     for i in 0..WORD_LEN {
@@ -82,80 +104,47 @@ pub fn check(target: &[u8], guess: &[u8]) -> [LetterState; WORD_LEN] {
     res
 }
 
-pub fn random_seed() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(12345)
-}
-
-// Pick a random answer: the answers are exactly the colour-A words, known to number
-// ANSWER_COUNT, so choose an index and walk the stream to the idx-th colour-A word.
-pub fn pick_target(seed: u64) -> [u8; WORD_LEN] {
-    let idx = xorshift64(seed) as usize % ANSWER_COUNT;
-    let mut dec = RangeDecoder::new(UNION_RAW);
-    let mut model = Model::new(WORD_LEN, ORDER, INC);
-    let mut prev: Option<Vec<u8>> = None;
-    let (mut remaining, mut remaining_a) = (WORD_COUNT as u32, ANSWER_COUNT as u32);
-    let mut seen = 0;
-    for _ in 0..WORD_COUNT {
-        let w = decode_word(&mut dec, &mut model, prev.as_deref(), WORD_LEN);
-        if decode_color(&mut dec, &mut remaining, &mut remaining_a) {
-            if seen == idx {
-                return std::array::from_fn(|i| b'a' + w[i]);
-            }
-            seen += 1;
-        }
-        prev = Some(w);
-    }
-    // Reachable ONLY if `union.bin` is corrupt: with intact data the stream holds exactly
-    // ANSWER_COUNT colour-A words (guaranteed by the encoder, checked by `union_round_trips`),
-    // so `seen` hits `idx < ANSWER_COUNT` before the loop ends and we return above. Under
-    // immediate-abort this compiles to a bare abort. See OPTIMIZATION.md "immediate-abort safety".
-    unreachable!("colour-A words number ANSWER_COUNT, so idx is always reached")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Decode the whole stream once and check the structural invariants the encoder promises:
-    // exactly WORD_COUNT words, strictly ascending, and exactly ANSWER_COUNT colour-A words.
-    // Any range-coder or model divergence between the two ends would break one of these.
-    #[test]
-    fn union_round_trips() {
-        let mut dec = RangeDecoder::new(UNION_RAW);
-        let mut model = Model::new(WORD_LEN, ORDER, INC);
-        let mut prev: Option<Vec<u8>> = None;
-        let (mut remaining, mut remaining_a) = (WORD_COUNT as u32, ANSWER_COUNT as u32);
-        let mut answers = 0;
-        for n in 0..WORD_COUNT {
-            let w = decode_word(&mut dec, &mut model, prev.as_deref(), WORD_LEN);
-            assert_eq!(w.len(), WORD_LEN);
-            assert!(w.iter().all(|&c| c < 26), "word {n} has a non-letter symbol");
-            if let Some(p) = &prev {
-                assert!(w.as_slice() > p.as_slice(), "word {n} is not strictly after the previous");
-            }
-            if decode_color(&mut dec, &mut remaining, &mut remaining_a) {
-                answers += 1;
-            }
-            prev = Some(w);
-        }
-        assert_eq!(answers, ANSWER_COUNT);
+    fn play(game: &mut Game, word: &str) -> bool {
+        let mut w = [0u8; WORD_LEN];
+        w.copy_from_slice(word.as_bytes());
+        game.submit(&w)
     }
 
     #[test]
-    fn known_words_are_valid_and_junk_is_not() {
-        assert!(is_valid(b"crane"));
-        assert!(is_valid(b"slate"));
-        assert!(!is_valid(b"zzzzz"));
+    fn invalid_word_is_rejected_and_costs_no_guess() {
+        let mut game = Game::with_target(*b"crane");
+        assert!(!play(&mut game, "zzzzz"));
+        assert_eq!(game.guesses().len(), 0);
+        assert_eq!(game.phase(), Phase::Playing);
     }
 
     #[test]
-    fn picked_targets_are_valid_answers() {
-        for seed in 0..50 {
-            let t = pick_target(seed);
-            assert!(is_valid(&t), "picked target {:?} is not a valid word", t);
+    fn valid_wrong_word_advances_without_winning() {
+        let mut game = Game::with_target(*b"crane");
+        assert!(play(&mut game, "slate"));
+        assert_eq!(game.guesses().len(), 1);
+        assert_eq!(game.phase(), Phase::Playing);
+    }
+
+    #[test]
+    fn matching_word_wins() {
+        let mut game = Game::with_target(*b"crane");
+        assert!(play(&mut game, "crane"));
+        assert_eq!(game.phase(), Phase::Won);
+        assert_eq!(game.guesses().last().unwrap().result, [LetterState::Correct; WORD_LEN]);
+    }
+
+    #[test]
+    fn max_wrong_guesses_loses() {
+        let mut game = Game::with_target(*b"crane");
+        for _ in 0..MAX_GUESSES {
+            play(&mut game, "slate");
         }
+        assert_eq!(game.phase(), Phase::Lost);
+        assert_eq!(game.guesses().len(), MAX_GUESSES);
     }
 }

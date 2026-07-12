@@ -16,7 +16,7 @@ overflow-checks = false
 crossterm = { version = "0.29.0", default-features = false, features = ["windows", "events"] }
 
 # Off-tree stats reporter (not built by `cargo build`; run with `cargo run --example stats`).
-# Reads the build's own constants.rs + union.bin, so it never links into the game binary.
+# Reads the build's own constants.rs + corpus.bin, so it never links into the game binary.
 [[example]]
 name = "stats"
 path = "tools/stats.rs"
