@@ -1,0 +1,5 @@
+# Opt-in size-optimization: pass `--config .cargo/crossterm-patch.toml` to swap in the vendored
+# crossterm. NOT auto-loaded, so a plain `cargo build` stays on upstream. Full rationale, the
+# path-resolution reason it lives in .cargo/, and the Cargo.lock caveat: vendor/crossterm/LOCAL_PATCH.md.
+[patch.crates-io]
+crossterm = { path = "vendor/crossterm" }

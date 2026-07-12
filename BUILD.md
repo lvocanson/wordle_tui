@@ -13,6 +13,11 @@ The `build-std` and `immediate-abort` profiles need, once:
 rustup toolchain install nightly --component rust-src
 ```
 
+### Vendored crossterm (opt-in, size)
+
+Appending **`--config .cargo/crossterm-patch.toml`** to any build command swaps in our vendored
+crossterm. See `vendor/crossterm/LOCAL_PATCH.md` for more information.
+
 ---
 
 ## Windows (PowerShell, MSVC)
@@ -36,7 +41,7 @@ cargo +nightly build --release --target x86_64-pc-windows-msvc
 **immediate-abort:**
 
 ```powershell
-$env:RUSTFLAGS = '-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clink-arg=/OPT:ICF -Clink-arg=/DEBUG:NONE'; cargo +nightly build --release --target x86_64-pc-windows-msvc; Remove-Item Env:RUSTFLAGS
+$env:RUSTFLAGS = '-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clink-arg=/OPT:ICF -Clink-arg=/DEBUG:NONE'; cargo +nightly build --release --target x86_64-pc-windows-msvc --config .cargo/crossterm-patch.toml; Remove-Item Env:RUSTFLAGS
 ```
 
 > `RUSTFLAGS` **overrides** the `[target]` block (it does not merge), so `/OPT:ICF` and
@@ -69,7 +74,7 @@ RUSTFLAGS="-Zunstable-options -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -C
 
 ```bash
 RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none" \
-  cargo +nightly build --release --target x86_64-unknown-linux-gnu
+  cargo +nightly build --release --target x86_64-unknown-linux-gnu --config .cargo/crossterm-patch.toml
 ```
 
 > `RUSTFLAGS` **overrides** the `[target]` block, so `--build-id=none` is repeated in every line.
@@ -108,5 +113,5 @@ RUSTFLAGS="-Zunstable-options -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -C
 
 ```bash
 RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none" \
-  cargo +nightly build --release --target x86_64-unknown-linux-musl
+  cargo +nightly build --release --target x86_64-unknown-linux-musl --config .cargo/crossterm-patch.toml
 ```

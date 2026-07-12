@@ -357,6 +357,21 @@ Measured Windows immediate-abort: **77,838 → 72,061 (−5,777 B)**. On **Linux
 no WinAPI path to reclaim. What it did **not** reclaim is `supports_ansi`'s `env::var` + `Once` —
 see Stuck costs.
 
+## Vendored crossterm: ioctl-only `terminal::size()` (Linux −28,705 B)
+
+crossterm's `terminal::size()` spawns `tput` as a fallback; because the event source calls `size()`
+on every resize, that fallback is always reachable and anchors `std::process::Command` + a
+`BTreeMap<OsString, OsString>` env copy + their `Debug`/`fmt` subtree. A **vendored crossterm** with
+an ioctl-only `size()` drops it: **Linux 118,608 → 89,903, −28,705 B**; Windows unaffected. It is
+**opt-in** (a `[patch]` can't be a Cargo feature), injected via `--config .cargo/crossterm-patch.toml`
+so a plain `cargo build` stays on upstream. Full rationale, wiring, and the `Cargo.lock` caveat:
+**`vendor/crossterm/LOCAL_PATCH.md`**.
+
+Measured Linux: **118,608 → 89,903 (−28,705 B, −24 %)**; `nm` confirms `tput_value`/`Command`/
+`BTreeMap` are gone. Windows is unaffected (its `size()` uses `GetConsoleScreenBufferInfo`, no
+`tput`). Only crossterm's lib target is built as a dependency, so the vendored copy is trimmed to
+`src/` + `Cargo.toml` + `LICENSE` + `README.md`.
+
 ## Stuck costs
 
 - **`parking_lot` (~3.3 KB) + the `supports_ansi` probe (~2.5 KB): `env::var` + a
@@ -375,16 +390,8 @@ see Stuck costs.
   post-link `objcopy --remove-section .eh_frame --remove-section .eh_frame_hdr` (measured Linux
   **118,608 → 99,956, −18,652 B**; runtime-validate before relying on it — it leaves a dangling
   `PT_GNU_EH_FRAME` program header).
-- **Linux `tput` spawn (~28.7 KB measured): `tput_value` + `std::process::Command` + a
-  `BTreeMap<OsString, OsString>` (the environment copy) + the whole `OsString`/`Path`/`ByteStr`
-  `Debug`/`fmt` subtree they drag in.** `crossterm::terminal::size()` falls back to spawning
-  `tput cols`/`tput lines` when the `TIOCGWINSZ` ioctl fails; crossterm's own Unix event source
-  calls `size()` on every resize, so the fallback stays reachable regardless of our code (switching
-  our own call to the ioctl-only `window_size()` does nothing). Reclaimable only by patching crossterm
-  to make `size()` ioctl-only — **measured with a throwaway `[patch.crates-io]` copy: Linux
-  118,608 → 89,903, −28,705 B** (bigger than it looks: the `tput` `Command` was the sole anchor for
-  a large env/Debug/OsString cluster). Cost: you then maintain a crossterm fork (a git `[patch]`
-  keeps the repo footprint to one line + a `Cargo.lock` pin; re-rebase on each crossterm upgrade).
+  (The `tput` spawn cluster, once the biggest Linux stuck cost at ~28.7 KB, is now **reclaimed** —
+  see "Vendored crossterm" above.)
 - Everything else in `.text` is either ours (`main`, `ui::build_grid`, `app::submit`,
   `codec::decode_word`) or genuinely-used std/crossterm.
 
@@ -394,10 +401,10 @@ see Stuck costs.
 - Stable optimized (default, no prerequisites): **214,016** (−46.0%)
 - build-std nightly, no `backtrace`, terminal still restored: **117,248** (−70.4%)
 - + immediate-abort, **Windows** (terminal not restored on panic): **72,061** (−81.8%)
-- + immediate-abort, **Linux** (x86_64-unknown-linux-gnu): **118,608** (−70.1%)
+- + immediate-abort, **Linux** (x86_64-unknown-linux-gnu, vendored crossterm): **89,903** (−77.3%)
 
-The two immediate-abort figures are the current numbers, after the arithmetic-coded data layer and
-the raw-ANSI output refactor; the stable / build-std-with-restore rows above predate that recent
-work and were not re-measured this round. Linux is ~46 KB heavier than Windows almost entirely from
-two stuck costs listed above: `.eh_frame` unwind tables (~18.6 KB) and the `tput`/`Command`/env-map
-cluster (~14 KB), plus the Unix input stack (`parse_event`, signal-hook, mio).
+The two immediate-abort figures are the current numbers, after the arithmetic-coded data layer, the
+raw-ANSI output refactor, and the vendored ioctl-only `size()`; the stable / build-std-with-restore
+rows above predate that recent work and were not re-measured this round. Linux is now ~18 KB heavier
+than Windows, almost all of it the `.eh_frame` unwind tables (~18.6 KB, still stuck — see above),
+plus the genuinely-needed Unix input stack (`parse_event`, signal-hook, mio).
