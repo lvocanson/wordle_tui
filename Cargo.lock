@@ -240,4 +240,5 @@ name = "wordle_tui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "crossterm_winapi",
 ]

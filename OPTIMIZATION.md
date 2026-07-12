@@ -245,7 +245,8 @@ theoretical (it would require a corrupted binary, at which point terminal state 
   `Playing` (`submit` flips to `Lost` as soon as `input_idx >= 6`) and every draft/typing path
   runs only in `Playing`; `keyboard_letter_states` slices `history[..input_idx]` with
   `input_idx <= 6 = history.len()`. `type_letter`/`backspace` are guarded on `input_len`.
-  `copy_from_slice` copies two `[u8; 5]`. `str::from_utf8(&target)` feeds `unwrap_or_else`.
+  `copy_from_slice` copies two `[u8; 5]`. The lost-message builds its string by pushing the
+  target's uppercased bytes as `char`s (all ASCII, infallible — no `str::from_utf8`).
 - **`ui.rs` layout math** — the sole runtime division (`div_round`) is only called from `gaps`
   with divisor `d = n - 1 >= 1` (guarded `n <= 1`); `gaps`/`stack_sizes` run with
   `n <= SECTION_COUNT = 4 < MAX_GUESSES`, so their fixed-size arrays never overflow;
@@ -285,6 +286,11 @@ binary — the opposite of the goal. The invariant is enforced where it belongs,
 - **`App::submit`: array-copy → `guess == &self.target`.** Cleaner, but **+48 B**. Kept the copy.
 - **`ui::gaps`: indexed loop → `iter_mut().take(d).enumerate()`** (clippy's suggestion). **+16 B**
   (the `.take` iterator machinery). Kept the indexed loop under `#[allow(needless_range_loop)]`.
+- **Raw-handle stdout output (Windows): write to the stdout `HANDLE` via `File`/`WriteFile` to skip
+  std's console UTF-16 path (`write_valid_utf8_to_console` + `EncodeUtf16`).** Measured only
+  **−314 B** — the `File`/`WriteFile` path pulls back most of what the UTF-16 path freed. Not worth
+  the `unsafe` handle wrapping, a platform-split writer type, and output-path risk that can't be
+  verified without a real Windows console. Rejected.
 
 ## Idiomatic changes that were free or a win
 
@@ -324,18 +330,61 @@ Checked whether trimming crossterm or its transitive deps' cargo features could 
   crossterm's deps from here is therefore impossible; the only lever would be `[patch]`-ing
   crossterm, which buys nothing given `parking_lot`'s empty defaults.
 
+## Raw ANSI output (dropped crossterm's `style`/`Command` layer)
+
+`ui::render` and `main.rs`'s terminal setup no longer go through crossterm's
+`SetForegroundColor`/`MoveTo`/`EnterAlternateScreen`/`SetTitle`/`Clear`/… commands; they write the
+escape bytes directly. Colors are precomputed `&'static [u8]` SGR constants stored in each `Cell`;
+alt-screen/title/cursor-hide/clear are literal CSI/OSC byte strings (byte-identical to what
+crossterm emits). What this reclaims on **Windows**:
+
+- the **integer `fmt` machinery** the color/cursor commands pulled in via `write!`
+  (`Colored::fmt`, `pad_integral`, `fmt::write`) — `render` was the only integer-formatting site;
+- the **WinAPI fallback** of every terminal/cursor command (`SetConsoleTitleW` + its UTF-16
+  `EncodeUtf16` path, alt-screen/cursor/clear via the console API): each command compiled *both* an
+  ANSI and a WinAPI path, picked at runtime by `supports_ansi()`, so both were linked. Deleting the
+  commands drops the WinAPI halves.
+
+Mouse capture **stays** on crossterm: on Windows `EnableMouseCapture` is WinAPI-only
+(`is_ansi_code_supported() == false`) because the console event source reads mouse from the input
+buffer, not from ANSI reports — the `?1000h…` sequences would not work. Since we no longer call
+`supports_ansi()` (which enabled VT as a side effect), `init_terminal` sets
+`ENABLE_VIRTUAL_TERMINAL_PROCESSING` itself via `crossterm_winapi` (`#[cfg(windows)]`, already a
+transitive dep of crossterm → **0 graph cost**).
+
+Measured Windows immediate-abort: **77,838 → 72,061 (−5,777 B)**. On **Linux** it is byte-neutral
+(+15 B): crossterm already emits ANSI there and `supports_ansi` is `#[cfg(windows)]`, so there was
+no WinAPI path to reclaim. What it did **not** reclaim is `supports_ansi`'s `env::var` + `Once` —
+see Stuck costs.
+
 ## Stuck costs
 
-- **`parking_lot` (~3.3 KB):** a hard dependency of crossterm's `events` feature (the global
-  `INTERNAL_EVENT_READER` mutex). Not removable without losing input handling, and not
-  feature-tunable (see the dependency audit above). Already on `default-features = false,
-  features = ["windows", "events"]`.
+- **`parking_lot` (~3.3 KB) + the `supports_ansi` probe (~2.5 KB): `env::var` + a
+  `parking_lot::Once`, plus a `Colored::fmt`/`pad_integral` residue.** Both are anchored by
+  `crossterm::event`/`terminal` on Windows — the global `INTERNAL_EVENT_READER` mutex, and a
+  still-reachable `supports_ansi()`. **Confirmed stuck by experiment:** after moving *all* rendering
+  and terminal setup off crossterm's `style`/`Command` layer (see "Raw ANSI output") and even
+  stubbing out the last `execute!` (mouse) calls, `supports_ansi`/`env::var`/`Once` remain in the
+  binary. So the earlier belief that this ~2.5 KB was reclaimable "by bypassing style/Color" was
+  **wrong**: it is held by `event`/`terminal`, not by styling, and cannot go without dropping input.
 - On **stable**, the panic/backtrace machinery (~12 KB), io::error fmt (~3 KB) and env (~2 KB) are
   unavoidably linked by the panic runtime — the `backtrace` lever above only exists on nightly.
-- **crossterm's TERM/NO_COLOR detection** (`std::env::var` + `from_utf8` + a `Once`, ~2 KB in the
-  immediate-abort build) exists purely so crossterm can choose ANSI vs WinAPI styling. The only
-  way to reclaim it is to bypass crossterm's `style`/`Color` commands and emit raw ANSI escapes
-  ourselves — a rewrite, and it would *not* free parking_lot (events still needs the mutex).
+- **Linux `.eh_frame` + `.eh_frame_hdr` (~18.6 KB).** Unwind tables from the *prebuilt* std. Dead
+  under `panic=abort`/immediate-abort (nothing unwinds), but this profile links prebuilt std, so the
+  build flags cannot drop them. Reclaimable via build-std (`-Cforce-unwind-tables=no`) or a
+  post-link `objcopy --remove-section .eh_frame --remove-section .eh_frame_hdr` (measured Linux
+  **118,608 → 99,956, −18,652 B**; runtime-validate before relying on it — it leaves a dangling
+  `PT_GNU_EH_FRAME` program header).
+- **Linux `tput` spawn (~28.7 KB measured): `tput_value` + `std::process::Command` + a
+  `BTreeMap<OsString, OsString>` (the environment copy) + the whole `OsString`/`Path`/`ByteStr`
+  `Debug`/`fmt` subtree they drag in.** `crossterm::terminal::size()` falls back to spawning
+  `tput cols`/`tput lines` when the `TIOCGWINSZ` ioctl fails; crossterm's own Unix event source
+  calls `size()` on every resize, so the fallback stays reachable regardless of our code (switching
+  our own call to the ioctl-only `window_size()` does nothing). Reclaimable only by patching crossterm
+  to make `size()` ioctl-only — **measured with a throwaway `[patch.crates-io]` copy: Linux
+  118,608 → 89,903, −28,705 B** (bigger than it looks: the `tput` `Command` was the sole anchor for
+  a large env/Debug/OsString cluster). Cost: you then maintain a crossterm fork (a git `[patch]`
+  keeps the repo footprint to one line + a `Cargo.lock` pin; re-rebase on each crossterm upgrade).
 - Everything else in `.text` is either ours (`main`, `ui::build_grid`, `app::submit`,
   `codec::decode_word`) or genuinely-used std/crossterm.
 
@@ -344,4 +393,11 @@ Checked whether trimming crossterm or its transitive deps' cargo features could 
 - Baseline: 396,288
 - Stable optimized (default, no prerequisites): **214,016** (−46.0%)
 - build-std nightly, no `backtrace`, terminal still restored: **117,248** (−70.4%)
-- + immediate-abort (terminal not restored on panic): **87,040** (−78.0%)
+- + immediate-abort, **Windows** (terminal not restored on panic): **72,061** (−81.8%)
+- + immediate-abort, **Linux** (x86_64-unknown-linux-gnu): **118,608** (−70.1%)
+
+The two immediate-abort figures are the current numbers, after the arithmetic-coded data layer and
+the raw-ANSI output refactor; the stable / build-std-with-restore rows above predate that recent
+work and were not re-measured this round. Linux is ~46 KB heavier than Windows almost entirely from
+two stuck costs listed above: `.eh_frame` unwind tables (~18.6 KB) and the `tput`/`Command`/env-map
+cluster (~14 KB), plus the Unix input stack (`parse_event`, signal-hook, mio).
