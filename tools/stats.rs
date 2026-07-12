@@ -25,16 +25,21 @@ fn main() {
 
 // --- Compression report -------------------------------------------------------------------------
 
-/// Byte size of the raw word lists the build compresses.
-fn source_bytes() -> u64 {
-    let len = |path: &str| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    len(concat!(env!("CARGO_MANIFEST_DIR"), "/res/answer_words.txt"))
-        + len(concat!(env!("CARGO_MANIFEST_DIR"), "/res/valid_words.txt"))
+/// The raw word-list sources the build compresses, as (label, path) pairs.
+const SOURCES: [(&str, &str); 2] = [
+    ("answers", concat!(env!("CARGO_MANIFEST_DIR"), "/res/answer_words.txt")),
+    ("valid", concat!(env!("CARGO_MANIFEST_DIR"), "/res/valid_words.txt")),
+];
+
+/// On-disk byte size of a source file (0 if it cannot be read).
+fn file_len(path: &str) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
 fn print_compression() {
     let valid = WORD_COUNT - ANSWER_COUNT;
-    let source = source_bytes();
+    let sizes: Vec<u64> = SOURCES.iter().map(|(_, p)| file_len(p)).collect();
+    let source: u64 = sizes.iter().sum();
     let packed = BLOB.len() as u64;
 
     println!("Wordle data");
@@ -45,13 +50,13 @@ fn print_compression() {
         commas(valid as u64),
     );
     println!();
-    println!("{}", row3("stage", "bytes", "KiB"));
-    println!("{}", size_line("source", source));
-    println!("{}", size_line("packed", packed));
-    println!();
-    println!(
-        "  {:.1}% of source - {:.2} B/word - encoder order {ORDER}, inc {INC}",
-        packed as f64 / source as f64 * 100.0,
+    println!("{}", row("stage", "bytes", "KiB", "% src"));
+    for ((label, _), &size) in SOURCES.iter().zip(&sizes) {
+        println!("{}", size_line(label, size, source));
+    }
+    println!("{}", size_line("source", source, source));
+    println!("{}", size_line("packed", packed, source));
+    println!("-> {:.2} B/word - encoder order {ORDER}, inc {INC}",
         packed as f64 / WORD_COUNT as f64,
     );
 }
@@ -80,11 +85,24 @@ fn print_binary_size() {
     println!("  {} B on disk (file-aligned)\n", commas(bytes.len() as u64));
 
     #[cfg(windows)]
-    print_pe_sections(&bytes);
+    let total = print_pe_sections(&bytes);
     #[cfg(target_os = "linux")]
-    print_elf_sections(&bytes, &path);
+    let total = print_elf_sections(&bytes, &path);
     #[cfg(not(any(windows, target_os = "linux")))]
-    println!("  (section breakdown is not available on this platform)");
+    let total = {
+        println!("  (section breakdown is not available on this platform)");
+        bytes.len() as u64
+    };
+
+    // The packed word corpus is embedded verbatim in the binary (see `src/words.rs`), so its share
+    // of the total is a direct read on how much of the game is Wordle data.
+    println!();
+    println!(
+        "  word blob {} B = {:.1}% of the {} B total",
+        commas(BLOB.len() as u64),
+        BLOB.len() as f64 / total as f64 * 100.0,
+        commas(total),
+    );
 }
 
 /// Locate the built game binary: an explicit CLI argument wins, otherwise pick the most recently
@@ -117,13 +135,14 @@ fn game_binary() -> Option<PathBuf> {
 /// 512 B file-aligned `SizeOfRawData`), plus the total to compare between size changes. Parses the
 /// header directly, so it targets the MSVC build. Mirrors the old `size.ps1`.
 #[cfg(windows)]
-fn print_pe_sections(bytes: &[u8]) {
+fn print_pe_sections(bytes: &[u8]) -> u64 {
     let pe = u32le(bytes, 0x3C) as usize; // e_lfanew -> PE signature
     let num = u16le(bytes, pe + 6) as usize; // NumberOfSections
     let opt = u16le(bytes, pe + 20) as usize; // SizeOfOptionalHeader
     let tab = pe + 24 + opt; // section table follows the optional header
 
-    println!("{}", row3("section", "bytes", "KiB"));
+    // Collect first so each row can be shown as a percentage of the total computed below.
+    let mut sections = Vec::with_capacity(num);
     let mut total = 0u64;
     for i in 0..num {
         let off = tab + i * 40; // 40 B per IMAGE_SECTION_HEADER
@@ -132,21 +151,27 @@ fn print_pe_sections(bytes: &[u8]) {
             .trim_end_matches('\0');
         let vsize = u32le(bytes, off + 8) as u64; // VirtualSize (un-padded)
         total += vsize;
-        println!("{}", size_line(name, vsize));
+        sections.push((name, vsize));
     }
-    println!("{}   <- compare", size_line("total", total));
+
+    println!("{}", row("section", "bytes", "KiB", "% total"));
+    for (name, vsize) in sections {
+        println!("{}", size_line(name, vsize, total));
+    }
+    println!("{}   <- compare", size_line("total", total, total));
+    total
 }
 
 /// ELF section table: each section's `sh_size` (un-padded byte count) plus the total — the
 /// self-contained equivalent of `size -A`, so no binutils dependency. Handles 64-bit
 /// little-endian ELF (the only shape the project targets); anything else falls back to a hint.
 #[cfg(target_os = "linux")]
-fn print_elf_sections(bytes: &[u8], path: &Path) {
+fn print_elf_sections(bytes: &[u8], path: &Path) -> u64 {
     // ELF64 LE only: magic 0x7f'E''L''F', EI_CLASS == 2 (64-bit), EI_DATA == 1 (little-endian).
     if bytes.get(..4) != Some(&b"\x7fELF"[..]) || bytes.get(4) != Some(&2) || bytes.get(5) != Some(&1)
     {
         println!("  (not 64-bit little-endian ELF; use `size -A {}`)", path.display());
-        return;
+        return bytes.len() as u64;
     }
     let shoff = u64le(bytes, 0x28) as usize; // e_shoff: section header table offset
     let shentsize = u16le(bytes, 0x3A) as usize; // e_shentsize
@@ -161,7 +186,8 @@ fn print_elf_sections(bytes: &[u8], path: &Path) {
         std::str::from_utf8(&bytes[start..end]).unwrap_or("?")
     };
 
-    println!("{}", row3("section", "bytes", "KiB"));
+    // Collect first so each row can be shown as a percentage of the total computed below.
+    let mut sections = Vec::new();
     let mut total = 0u64;
     for i in 1..shnum {
         // skip the SHT_NULL entry at index 0, and the section-name string table (which binutils
@@ -176,9 +202,15 @@ fn print_elf_sections(bytes: &[u8], path: &Path) {
             continue;
         }
         let name = name_at(u32le(bytes, e)); // sh_name
-        println!("{}", size_line(name, size));
+        sections.push((name, size));
     }
-    println!("{}   <- compare", size_line("total", total));
+
+    println!("{}", row("section", "bytes", "KiB", "% total"));
+    for (name, size) in sections {
+        println!("{}", size_line(name, size, total));
+    }
+    println!("{}   <- compare", size_line("total", total, total));
+    total
 }
 
 /// Label column width: wide enough for long ELF section names on Linux, tight elsewhere.
@@ -187,15 +219,22 @@ const LABEL_W: usize = 18;
 #[cfg(not(target_os = "linux"))]
 const LABEL_W: usize = 9;
 
-/// One table line — a left-aligned label plus the right-aligned `bytes` and `KiB` columns. The
-/// single place the layout (and `LABEL_W`) lives; used for both the header and every data row.
-fn row3(label: &str, bytes: &str, kib: &str) -> String {
-    format!("  {label:<w$} {bytes:>11} {kib:>9}", w = LABEL_W)
+/// One table line — a left-aligned label plus the right-aligned `bytes`, `KiB`, and percentage
+/// columns. The single place the layout (and `LABEL_W`) lives; used for both the header and every
+/// data row.
+fn row(label: &str, bytes: &str, kib: &str, pct: &str) -> String {
+    format!("  {label:<w$} {bytes:>11} {kib:>9} {pct:>8}", w = LABEL_W)
 }
 
-/// A data row: label, byte count with thousands separators, and the same size in KiB.
-fn size_line(label: &str, bytes: u64) -> String {
-    row3(label, &commas(bytes), &format!("{:.2}", bytes as f64 / 1024.0))
+/// A data row: label, byte count with thousands separators, the same size in KiB, and its share of
+/// `total` (blank when `total` is zero, to avoid a divide-by-zero).
+fn size_line(label: &str, bytes: u64, total: u64) -> String {
+    let pct = if total > 0 {
+        format!("{:.1}%", bytes as f64 / total as f64 * 100.0)
+    } else {
+        String::new()
+    };
+    row(label, &commas(bytes), &format!("{:.2}", bytes as f64 / 1024.0), &pct)
 }
 
 /// Little-endian header readers, shared by the PE and ELF parsers.
