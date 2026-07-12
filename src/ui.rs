@@ -58,25 +58,23 @@ const MINI_H: usize = MAX_GUESSES; // shortest terminal that can show a board
 // ----------------------------------------------------------------------------
 
 pub struct Grid {
-    w: usize,
-    h: usize,
-    ch: Vec<u8>,
-    fg: Vec<Color>,
-    bg: Vec<Color>,
-    bold: Vec<bool>,
-    hit: Vec<Option<Action>>,
+    width: usize,
+    height: usize,
+    characters: Vec<u8>,
+    foreground_colors: Vec<Color>,
+    background_colors: Vec<Color>,
+    hit_actions: Vec<Option<Action>>,
 }
 
 impl Grid {
     fn new(w: usize, h: usize) -> Self {
         Grid {
-            w,
-            h,
-            ch: vec![b' '; w * h],
-            fg: vec![Color::Reset; w * h],
-            bg: vec![Color::Reset; w * h],
-            bold: vec![false; w * h],
-            hit: vec![None; w * h],
+            width: w,
+            height: h,
+            characters: vec![b' '; w * h],
+            foreground_colors: vec![Color::Reset; w * h],
+            background_colors: vec![Color::Reset; w * h],
+            hit_actions: vec![None; w * h],
         }
     }
 
@@ -85,8 +83,8 @@ impl Grid {
         for dy in 0..h {
             for dx in 0..w {
                 let (px, py) = (x + dx, y + dy);
-                if px < self.w && py < self.h {
-                    self.hit[py * self.w + px] = Some(action);
+                if px < self.width && py < self.height {
+                    self.hit_actions[py * self.width + px] = Some(action);
                 }
             }
         }
@@ -94,26 +92,25 @@ impl Grid {
 
     // The action registered at a screen cell, if any (out-of-bounds reads as None).
     pub fn hit_test(&self, x: usize, y: usize) -> Option<Action> {
-        if x < self.w && y < self.h {
-            self.hit[y * self.w + x]
+        if x < self.width && y < self.height {
+            self.hit_actions[y * self.width + x]
         } else {
             None
         }
     }
 
-    fn set(&mut self, x: usize, y: usize, ch: u8, fg: Color, bg: Color, bold: bool) {
-        if x < self.w && y < self.h {
-            let i = y * self.w + x;
-            self.ch[i] = ch;
-            self.fg[i] = fg;
-            self.bg[i] = bg;
-            self.bold[i] = bold;
+    fn set(&mut self, x: usize, y: usize, ch: u8, fg: Color, bg: Color) {
+        if x < self.width && y < self.height {
+            let i = y * self.width + x;
+            self.characters[i] = ch;
+            self.foreground_colors[i] = fg;
+            self.background_colors[i] = bg;
         }
     }
 
-    fn text(&mut self, x: usize, y: usize, s: &[u8], fg: Color, bg: Color, bold: bool) {
+    fn text(&mut self, x: usize, y: usize, s: &[u8], fg: Color, bg: Color) {
         for (i, &b) in s.iter().enumerate() {
-            self.set(x + i, y, b, fg, bg, bold);
+            self.set(x + i, y, b, fg, bg);
         }
     }
 }
@@ -223,7 +220,7 @@ fn draw_cell(grid: &mut Grid, x: usize, y: usize, w: usize, h: usize, letter: u8
     let bg = cell_bg_color(&c);
     for dy in 0..h {
         for dx in 0..w {
-            grid.set(x + dx, y + dy, b' ', bg, bg, false);
+            grid.set(x + dx, y + dy, b' ', bg, bg);
         }
     }
     grid.set(
@@ -232,7 +229,6 @@ fn draw_cell(grid: &mut Grid, x: usize, y: usize, w: usize, h: usize, letter: u8
         letter.to_ascii_uppercase(),
         Color::White,
         bg,
-        false,
     );
 }
 
@@ -243,7 +239,7 @@ fn draw_cell(grid: &mut Grid, x: usize, y: usize, w: usize, h: usize, letter: u8
 fn draw_title(grid: &mut Grid, x: usize, y: usize, w: usize) {
     const T: &[u8] = b"- Wordle -";
     let off = w.saturating_sub(T.len()) / 2; // center the title over the whole width
-    grid.text(x + off, y, T, Color::Reset, Color::Reset, true);
+    grid.text(x + off, y, T, Color::Reset, Color::Reset);
 }
 
 fn draw_footer(grid: &mut Grid, app: &App, x: usize, y: usize, w: usize, h: usize) {
@@ -259,7 +255,6 @@ fn draw_footer(grid: &mut Grid, app: &App, x: usize, y: usize, w: usize, h: usiz
             &s.as_bytes()[..visible],
             fg,
             Color::Reset,
-            false,
         );
     };
     if h >= FOOTER_H {
@@ -399,10 +394,10 @@ fn draw_keyboard(grid: &mut Grid, app: &App, ky: usize, w: usize, vgap: usize) {
 fn draw_button(grid: &mut Grid, x: usize, y: usize, w: usize, label: &[u8], action: Action) {
     let bg = cell_bg_color(&CellColor::Keyboard);
     for dx in 0..w {
-        grid.set(x + dx, y, b' ', bg, bg, false);
+        grid.set(x + dx, y, b' ', bg, bg);
     }
     let off = w.saturating_sub(label.len()) / 2;
-    grid.text(x + off, y, label, Color::White, bg, false);
+    grid.text(x + off, y, label, Color::White, bg);
     grid.hit_rect(x, y, w, 1, action);
 }
 
@@ -432,7 +427,7 @@ pub fn build_grid(w: usize, h: usize, app: &App) -> Grid {
         } else {
             b"Terminal too short."
         };
-        grid.text(0, 0, msg, Color::Reset, Color::Reset, false);
+        grid.text(0, 0, msg, Color::Reset, Color::Reset);
         return grid;
     }
 
@@ -502,32 +497,27 @@ pub fn render<W: Write>(out: &mut W, grid: &Grid) -> std::io::Result<()> {
     use crossterm::queue;
     use crossterm::style::{Attribute, SetAttribute, SetBackgroundColor, SetForegroundColor};
 
-    for y in 0..grid.h {
+    for y in 0..grid.height {
         queue!(out, MoveTo(0, y as u16))?;
         let mut x = 0;
-        while x < grid.w {
-            let i = y * grid.w + x;
-            let (fg, bg, bold) = (grid.fg[i], grid.bg[i], grid.bold[i]);
+        while x < grid.width {
+            let i = y * grid.width + x;
+            let (fg, bg) = (grid.foreground_colors[i], grid.background_colors[i]);
             let start = i;
-            while x < grid.w {
-                let j = y * grid.w + x;
-                if grid.fg[j] != fg || grid.bg[j] != bg || grid.bold[j] != bold {
+            while x < grid.width {
+                let j = y * grid.width + x;
+                if grid.foreground_colors[j] != fg || grid.background_colors[j] != bg {
                     break;
                 }
                 x += 1;
             }
             queue!(
                 out,
-                SetAttribute(if bold {
-                    Attribute::Bold
-                } else {
-                    Attribute::Reset
-                }),
                 SetForegroundColor(fg),
                 SetBackgroundColor(bg)
             )?;
             // All glyphs are ASCII, so the raw bytes are valid UTF-8 for the terminal.
-            out.write_all(&grid.ch[start..y * grid.w + x])?;
+            out.write_all(&grid.characters[start..y * grid.width + x])?;
         }
     }
     queue!(out, SetAttribute(Attribute::Reset))?;
