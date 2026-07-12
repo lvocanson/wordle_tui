@@ -100,11 +100,10 @@ impl App {
             }
             Phase::Lost => {
                 self.controls = END_CONTROLS;
-                let mut upper = *self.game.target();
-                upper.make_ascii_uppercase();
-                let word = str::from_utf8(&upper).unwrap_or("?????");
                 let mut msg = String::from("The word was ");
-                msg.push_str(word);
+                self.game.target().iter().for_each(|c| {
+                    msg.push(c.to_ascii_uppercase() as char);
+                });
                 msg.push('.');
                 self.message = Some(msg);
             }

@@ -1,8 +1,6 @@
 use std::io::Write;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use crossterm::style::Color;
-
 use crate::game::{Game, LetterState, Score, MAX_GUESSES};
 use crate::words::WORD_LEN;
 
@@ -54,8 +52,7 @@ const MINI_H: usize = MAX_GUESSES; // shortest terminal that can show a board
 #[derive(Clone, Copy)]
 struct Cell {
     character: u8,
-    foreground_color: Color,
-    background_color: Color,
+    color: &'static [u8],
     hit_key: Option<KeyEvent>,
 }
 
@@ -69,8 +66,7 @@ impl Grid {
     fn new(w: usize, h: usize) -> Self {
         let blank = Cell {
             character: b' ',
-            foreground_color: Color::Reset,
-            background_color: Color::Reset,
+            color: COLOR_RESET,
             hit_key: None,
         };
         Grid {
@@ -101,18 +97,17 @@ impl Grid {
         }
     }
 
-    fn set(&mut self, x: usize, y: usize, ch: u8, fg: Color, bg: Color) {
+    fn set(&mut self, x: usize, y: usize, ch: u8, color: &'static [u8]) {
         if x < self.width && y < self.height {
             let cell = &mut self.cells[y * self.width + x];
             cell.character = ch;
-            cell.foreground_color = fg;
-            cell.background_color = bg;
+            cell.color = color;
         }
     }
 
-    fn text(&mut self, x: usize, y: usize, s: &[u8], fg: Color, bg: Color) {
+    fn text(&mut self, x: usize, y: usize, s: &[u8], color: &'static [u8]) {
         for (i, &b) in s.iter().enumerate() {
-            self.set(x + i, y, b, fg, bg);
+            self.set(x + i, y, b, color);
         }
     }
 }
@@ -192,24 +187,24 @@ enum CellColor {
     Board(LetterState),
 }
 
-// Background palette (24-bit). Empty cells are near-black; a draft cell (holds a typed letter
-// not yet submitted) is a lighter grey; the three submitted states are Wordle's green / yellow
-// / grey.
-const EMPTY_BG: Color = Color::Rgb { r: 18, g: 18, b: 19 };
-const DRAFT_BG: Color = Color::Rgb { r: 18, g: 18, b: 19 };
-const KEY_BG: Color = Color::Rgb { r: 129, g: 131, b: 132 };
-const CORRECT_BG: Color = Color::Rgb { r: 83, g: 141, b: 78 };
-const MISPLACED_BG: Color = Color::Rgb { r: 181, g: 159, b: 59 };
-const ABSENT_BG: Color = Color::Rgb { r: 58, g: 58, b: 60 };
+const COLOR_RESET: &[u8]      = b"\x1b[0m";
+const COLOR_WHITE_TEXT: &[u8] = b"\x1b[38;5;15m";
+const COLOR_RED_TEXT: &[u8]   = b"\x1b[38;5;1m";
+const COLOR_EMPTY: &[u8]      = b"\x1b[48;2;18;18;19m";
+const COLOR_DRAFT: &[u8]      = b"\x1b[48;2;18;18;19m";
+const COLOR_KEYBOARD: &[u8]   = b"\x1b[48;2;129;131;132m";
+const COLOR_CORRECT: &[u8]    = b"\x1b[48;2;83;141;78m";
+const COLOR_MISPLACED: &[u8]  = b"\x1b[48;2;181;159;59m";
+const COLOR_ABSENT: &[u8]     = b"\x1b[48;2;58;58;60m";
 
-fn cell_bg_color(c: &CellColor) -> Color {
+fn cell_color(c: CellColor) -> &'static [u8] {
     match c {
-        CellColor::Keyboard => KEY_BG,
-        CellColor::Board(LetterState::Empty) => EMPTY_BG,
-        CellColor::Board(LetterState::Draft) => DRAFT_BG,
-        CellColor::Board(LetterState::Submitted(Score::Correct)) => CORRECT_BG,
-        CellColor::Board(LetterState::Submitted(Score::Misplaced)) => MISPLACED_BG,
-        CellColor::Board(LetterState::Submitted(Score::Absent)) => ABSENT_BG,
+        CellColor::Keyboard => COLOR_KEYBOARD,
+        CellColor::Board(LetterState::Empty) => COLOR_EMPTY,
+        CellColor::Board(LetterState::Draft) => COLOR_DRAFT,
+        CellColor::Board(LetterState::Submitted(Score::Correct)) => COLOR_CORRECT,
+        CellColor::Board(LetterState::Submitted(Score::Misplaced)) => COLOR_MISPLACED,
+        CellColor::Board(LetterState::Submitted(Score::Absent)) => COLOR_ABSENT,
     }
 }
 
@@ -217,18 +212,17 @@ fn cell_bg_color(c: &CellColor) -> Color {
 // glyph is written unconditionally. Cells are always at least 1x1 (see `col_budget`), so
 // the centered position can't underflow.
 fn draw_cell(grid: &mut Grid, x: usize, y: usize, w: usize, h: usize, letter: u8, c: CellColor) {
-    let bg = cell_bg_color(&c);
+    let color = cell_color(c);
     for dy in 0..h {
         for dx in 0..w {
-            grid.set(x + dx, y + dy, b' ', bg, bg);
+            grid.set(x + dx, y + dy, b' ', color);
         }
     }
     grid.set(
         x + (w - 1) / 2,
         y + (h - 1) / 2,
         letter.to_ascii_uppercase(),
-        Color::White,
-        bg,
+        color,
     );
 }
 
@@ -239,14 +233,14 @@ fn draw_cell(grid: &mut Grid, x: usize, y: usize, w: usize, h: usize, letter: u8
 fn draw_title(grid: &mut Grid, x: usize, y: usize, w: usize) {
     const TITLE: &[u8] = b"- Wordle -";
     let off = w.saturating_sub(TITLE.len()) / 2; // center the title over the whole width
-    grid.text(x + off, y, TITLE, Color::Reset, Color::Reset);
+    grid.text(x + off, y, TITLE, COLOR_WHITE_TEXT);
 }
 
 fn draw_footer(grid: &mut Grid, message: Option<&str>, controls: &str, x: usize, y: usize, w: usize, h: usize) {
     let msg = message.unwrap_or("");
     // Center each line, and clip it to the band so an over-long message can't spill
     // past the right edge into neighbouring cells.
-    let put = |grid: &mut Grid, row: usize, s: &str, fg: Color| {
+    let put = |grid: &mut Grid, row: usize, s: &str, fg: &'static [u8]| {
         let off = (w / 2).saturating_sub(s.len() / 2);
         let visible = s.len().min(w.saturating_sub(off));
         grid.text(
@@ -254,17 +248,16 @@ fn draw_footer(grid: &mut Grid, message: Option<&str>, controls: &str, x: usize,
             row,
             &s.as_bytes()[..visible],
             fg,
-            Color::Reset,
         );
     };
     if h >= FOOTER_H {
-        put(grid, y, msg, Color::DarkRed);
-        put(grid, y + 1, controls, Color::Reset);
+        put(grid, y, msg, COLOR_RED_TEXT);
+        put(grid, y + 1, controls, COLOR_WHITE_TEXT);
     } else if h >= 1 {
         if message.is_some() {
-            put(grid, y, msg, Color::DarkRed);
+            put(grid, y, msg, COLOR_RED_TEXT);
         } else {
-            put(grid, y, controls, Color::Reset);
+            put(grid, y, controls, COLOR_WHITE_TEXT);
         }
     }
 }
@@ -361,12 +354,12 @@ fn draw_keyboard(grid: &mut Grid, game: &Game, y: usize, w: usize, vgap: usize) 
 
 // A grey labelled button that also registers its whole area as clickable.
 fn draw_button(grid: &mut Grid, x: usize, y: usize, w: usize, label: &[u8], key: KeyEvent) {
-    let bg = cell_bg_color(&CellColor::Keyboard);
+    let color = cell_color(CellColor::Keyboard);
     for dx in 0..w {
-        grid.set(x + dx, y, b' ', bg, bg);
+        grid.set(x + dx, y, b' ', color);
     }
     let off = w.saturating_sub(label.len()) / 2;
-    grid.text(x + off, y, label, Color::White, bg);
+    grid.text(x + off, y, label, color);
     grid.hit_rect(x, y, w, 1, key);
 }
 
@@ -396,7 +389,7 @@ pub fn build_grid(w: usize, h: usize, game: &Game, message: Option<&str>, contro
         } else {
             b"Terminal too short."
         };
-        grid.text(0, 0, msg, Color::Reset, Color::Reset);
+        grid.text(0, 0, msg, COLOR_WHITE_TEXT);
         return grid;
     }
 
@@ -464,29 +457,37 @@ pub fn build_grid(w: usize, h: usize, game: &Game, message: Option<&str>, contro
 // ----------------------------------------------------------------------------
 
 pub fn render<W: Write>(out: &mut W, grid: &Grid) -> std::io::Result<()> {
-    use crossterm::cursor::MoveTo;
-    use crossterm::queue;
-    use crossterm::style::{Attribute, SetAttribute, SetBackgroundColor, SetForegroundColor};
-
     for y in 0..grid.height {
-        queue!(out, MoveTo(0, y as u16))?;
+        // MoveTo(0, y): CSI row+1 ;1 H — x is always 0, so the column is a literal 1.
+        out.write_all(b"\x1b[")?;
+        {
+            let mut buf = [0u8; 5];
+            let mut i = buf.len();
+            let mut y = y + 1;
+            loop {
+                i -= 1;
+                buf[i] = b'0' + (y % 10) as u8;
+                y /= 10;
+                if y == 0 {
+                    break;
+                }
+            }
+            out.write_all(&buf[i..])?;
+        }
+        out.write_all(b";1H")?;
         let mut x = 0;
         while x < grid.width {
             let start = y * grid.width + x;
-            let (fg, bg) = (grid.cells[start].foreground_color, grid.cells[start].background_color);
+            let color = grid.cells[start].color;
             while x < grid.width {
                 let cell = &grid.cells[y * grid.width + x];
-                if cell.foreground_color != fg || cell.background_color != bg {
+                if cell.color != color {
                     break;
                 }
                 x += 1;
             }
             let end = y * grid.width + x;
-            queue!(
-                out,
-                SetForegroundColor(fg),
-                SetBackgroundColor(bg)
-            )?;
+            out.write_all(color)?;
             // AoS storage interleaves glyphs, so the run is emitted cell by cell rather than
             // as one contiguous slice. Bytes go through the buffered writer, not per syscall.
             // All glyphs are ASCII, so the raw bytes are valid UTF-8 for the terminal.
@@ -495,6 +496,5 @@ pub fn render<W: Write>(out: &mut W, grid: &Grid) -> std::io::Result<()> {
             }
         }
     }
-    queue!(out, SetAttribute(Attribute::Reset))?;
     out.flush()
 }
