@@ -25,11 +25,15 @@ fn main() {
 
 // --- Compression report -------------------------------------------------------------------------
 
-/// The raw word-list sources the build compresses, as (label, path) pairs.
-const SOURCES: [(&str, &str); 2] = [
-    ("answers", concat!(env!("CARGO_MANIFEST_DIR"), "/res/answer_words.txt")),
-    ("valid", concat!(env!("CARGO_MANIFEST_DIR"), "/res/valid_words.txt")),
-];
+/// The raw word-list sources the build compressed, as (label, path) pairs. The length suffix
+/// mirrors the file the build selected via WORDLE_WORD_LEN, read back from the generated WORD_LEN.
+fn sources() -> [(&'static str, String); 2] {
+    let res = concat!(env!("CARGO_MANIFEST_DIR"), "/res");
+    [
+        ("answers", format!("{res}/answer_words_{WORD_LEN}.txt")),
+        ("valid", format!("{res}/valid_words_{WORD_LEN}.txt")),
+    ]
+}
 
 /// On-disk byte size of a source file (0 if it cannot be read).
 fn file_len(path: &str) -> u64 {
@@ -37,8 +41,9 @@ fn file_len(path: &str) -> u64 {
 }
 
 fn print_compression() {
+    let sources = sources();
     let valid = WORD_COUNT - ANSWER_COUNT;
-    let sizes: Vec<u64> = SOURCES.iter().map(|(_, p)| file_len(p)).collect();
+    let sizes: Vec<u64> = sources.iter().map(|(_, p)| file_len(p)).collect();
     let source: u64 = sizes.iter().sum();
     let packed = BLOB.len() as u64;
 
@@ -51,13 +56,14 @@ fn print_compression() {
     );
     println!();
     println!("{}", row("stage", "bytes", "KiB", "% src"));
-    for ((label, _), &size) in SOURCES.iter().zip(&sizes) {
+    for ((label, _), &size) in sources.iter().zip(&sizes) {
         println!("{}", size_line(label, size, source));
     }
     println!("{}", size_line("source", source, source));
     println!("{}", size_line("packed", packed, source));
-    println!("-> {:.2} B/word - encoder order {ORDER}{}, inc {INC}, colour {}",
+    println!("-> {:.2} B/word ({:.2} b/letter) - encoder order {ORDER}{}, inc {INC}, colour {}",
         packed as f64 / WORD_COUNT as f64,
+        (packed * 8) as f64 / (WORD_COUNT * WORD_LEN) as f64,
         if USE_POS { "+pos" } else { "" },
         if USE_COLOR { format!("@{COLOR_POS}") } else { "global".to_string() },
     );

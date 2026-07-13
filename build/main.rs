@@ -33,24 +33,45 @@ fn main() {
     };
     assert!(max_guesses >= 1, "WORDLE_MAX_GUESSES must be at least 1");
 
+    // Word length selects which res/{answer,valid}_words_N.txt pair to compress: set
+    // WORDLE_WORD_LEN. Defaults to 5. The value only picks the source files here; the authoritative
+    // length is still inferred from the data below and cross-checked against this choice.
+    let selected_len: usize = match env::var("WORDLE_WORD_LEN") {
+        Ok(s) => s
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("WORDLE_WORD_LEN must be a positive integer, got {s:?}")),
+        Err(_) => 5,
+    };
+    assert!(selected_len >= 1, "WORDLE_WORD_LEN must be at least 1");
+
     // `--cfg immediate_abort` (set alongside -Cpanic=immediate-abort) gates the now-unreachable
     // panic hook out of main.rs; declare it here so the unexpected-cfg lint stays quiet.
     println!("cargo::rustc-check-cfg=cfg(immediate_abort)");
 
-    println!("cargo:rerun-if-changed=res/answer_words.txt");
-    println!("cargo:rerun-if-changed=res/valid_words.txt");
+    let answers_name = format!("answer_words_{selected_len}.txt");
+    let valid_name = format!("valid_words_{selected_len}.txt");
+
+    println!("cargo:rerun-if-changed=res/{answers_name}");
+    println!("cargo:rerun-if-changed=res/{valid_name}");
     println!("cargo:rerun-if-changed=src/codec.rs");
     println!("cargo:rerun-if-changed=build");
     println!("cargo:rerun-if-env-changed=WORDLE_MAX_GUESSES");
+    println!("cargo:rerun-if-env-changed=WORDLE_WORD_LEN");
 
-    let answers_txt = res.join("answer_words.txt");
-    let valid_txt = res.join("valid_words.txt");
+    let answers_txt = res.join(&answers_name);
+    let valid_txt = res.join(&valid_name);
     let mut answers = read_words(&answers_txt).unwrap_or_else(|e| panic!("answer words: {e}"));
     let mut valid = read_words(&valid_txt).unwrap_or_else(|e| panic!("valid words: {e}"));
 
-    // One length governs the whole game; infer it from every word in both lists.
+    
     let word_len = word_length(answers.iter().chain(&valid).map(|w| w.len()))
         .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        word_len, selected_len,
+        "WORDLE_WORD_LEN={selected_len} but res/{answers_name} + res/{valid_name} hold \
+         {word_len}-letter words",
+    );
 
     answers.sort_unstable();
     answers.dedup();
