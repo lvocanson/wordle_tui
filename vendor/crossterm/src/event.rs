@@ -134,10 +134,9 @@ pub use stream::EventStream;
 use crate::event::{
     filter::{EventFilter, Filter},
     read::InternalEventReader,
-    timeout::PollTimeout,
 };
 use crate::{csi, Command};
-use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
+use std::cell::UnsafeCell;
 use std::fmt::{self, Display};
 use std::time::Duration;
 
@@ -145,21 +144,23 @@ use bitflags::bitflags;
 use std::hash::{Hash, Hasher};
 
 /// Static instance of `InternalEventReader`.
-/// This needs to be static because there can be one event reader.
-static INTERNAL_EVENT_READER: Mutex<Option<InternalEventReader>> = parking_lot::const_mutex(None);
+///
+/// LOCAL PATCH — see vendor/crossterm/LOCAL_PATCH.md. Upstream guards this behind a
+/// `parking_lot::Mutex` for the general multi-threaded case. This app drives events from a single
+/// thread (one poll/read loop), so the lock is pure overhead; a bare cell drops `parking_lot` and
+/// `parking_lot_core` from the binary entirely.
+struct EventReaderCell(UnsafeCell<Option<InternalEventReader>>);
+// SAFETY: this app only ever touches the reader from its single event-loop thread. Making the cell
+// `Sync` is required to place it in a `static`; the single-thread invariant is what keeps the
+// unsynchronized access sound.
+unsafe impl Sync for EventReaderCell {}
+static INTERNAL_EVENT_READER: EventReaderCell = EventReaderCell(UnsafeCell::new(None));
 
-pub(crate) fn lock_internal_event_reader() -> MappedMutexGuard<'static, InternalEventReader> {
-    MutexGuard::map(INTERNAL_EVENT_READER.lock(), |reader| {
-        reader.get_or_insert_with(InternalEventReader::default)
-    })
-}
-fn try_lock_internal_event_reader_for(
-    duration: Duration,
-) -> Option<MappedMutexGuard<'static, InternalEventReader>> {
-    Some(MutexGuard::map(
-        INTERNAL_EVENT_READER.try_lock_for(duration)?,
-        |reader| reader.get_or_insert_with(InternalEventReader::default),
-    ))
+pub(crate) fn lock_internal_event_reader() -> &'static mut InternalEventReader {
+    // SAFETY: single-threaded access with no reentrancy — the reader's own `poll`/`read` never call
+    // back into this function (upstream's non-reentrant Mutex proves the same), so no `&mut` alias
+    // is ever live at once.
+    unsafe { (*INTERNAL_EVENT_READER.0.get()).get_or_insert_with(InternalEventReader::default) }
 }
 
 /// Checks if there is an [`Event`](enum.Event.html) available.
@@ -259,16 +260,9 @@ pub(crate) fn poll_internal<F>(timeout: Option<Duration>, filter: &F) -> std::io
 where
     F: Filter,
 {
-    let (mut reader, timeout) = if let Some(timeout) = timeout {
-        let poll_timeout = PollTimeout::new(Some(timeout));
-        if let Some(reader) = try_lock_internal_event_reader_for(timeout) {
-            (reader, poll_timeout.leftover())
-        } else {
-            return Ok(false);
-        }
-    } else {
-        (lock_internal_event_reader(), None)
-    };
+    // No lock to contend for (single-threaded, see EventReaderCell), so the full timeout is always
+    // available to the poll itself.
+    let reader = lock_internal_event_reader();
     reader.poll(timeout, filter)
 }
 
@@ -277,7 +271,7 @@ pub(crate) fn read_internal<F>(filter: &F) -> std::io::Result<InternalEvent>
 where
     F: Filter,
 {
-    let mut reader = lock_internal_event_reader();
+    let reader = lock_internal_event_reader();
     reader.read(filter)
 }
 

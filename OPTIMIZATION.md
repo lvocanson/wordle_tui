@@ -283,6 +283,13 @@ binary — the opposite of the goal. The invariant is enforced where it belongs,
   varies with the word data — only 3 numbers (`ORDER`/`INC`/`WORD_LEN`), already compile-time
   constants. Codegen would buy at most what const generics buy (≈0) while sacrificing the single
   shared `codec.rs` that makes encode/decode provably agree.
+- **`Model.pref_total`: drop the field, recompute `sum(pref)` on demand.** The invariant holds
+  (`pref_total == sum(pref)`, same as `total`/`counts` below), but `pref` is summed in *two* hot
+  spots (`pref_tot`, `pref_update`), so recomputing costs **+16 B** where dropping the parallel
+  `total` Vec *saved* 180. Kept the cached `pref_total` u32. (The Vec `total` was still worth
+  dropping — a whole `from_elem::<u32>` monomorphization; a cached u32 scalar is not.)
+- **`Model.counts`/`pref`: `Vec` → `Box<[T]>`.** `into_boxed_slice()` pulls in the shrink/realloc
+  path: **+156 B**. Kept `Vec`.
 - **`App::submit`: array-copy → `guess == &self.target`.** Cleaner, but **+48 B**. Kept the copy.
 - **`ui::gaps`: indexed loop → `iter_mut().take(d).enumerate()`** (clippy's suggestion). **+16 B**
   (the `.take` iterator machinery). Kept the indexed loop under `#[allow(needless_range_loop)]`.
@@ -298,6 +305,40 @@ Most idiomatic cleanups compile identically (confirmed byte-neutral): `Ordering`
 `w.cmp(&target)`, `array::from_fn`, the named-constant colour palette in `ui.rs`, small renames.
 One was a genuine win — **`ui::center`: `(outer-inner+1)/2` → `saturating_sub(inner).div_ceil(2)`**,
 cleaner and **−32 B**. Lesson: idiomatic ≠ smaller; measure each change.
+
+### `ui::render`: per-row `MoveTo(0, y)` → home once + CNL between rows (Windows −96 B)
+
+`render` positioned every row with an absolute `MoveTo(0, y)` — `CSI <row+1> ;1H` — which meant
+formatting `row+1` in base-10 on each row (a `buf[5]` divide-by-10 loop). Since rows are painted
+top-to-bottom and every row writes **exactly `width` printable ASCII glyphs** (SGR escapes don't
+move the cursor), the cursor's position after each row is deterministic: emit `CSI H` (home) once,
+then step down with `CSI E` (CNL — column 1 of the next line, what `crossterm::MoveToNextLine`
+emits) *between* rows only (never after the last, so it can't scroll the alt-screen at the bottom).
+That deletes the per-row decimal-formatting loop from `.text`. **Windows 66,053 → 65,957 (−96 B).**
+
+**Linux +8 B** (85,683 → 85,691): the loop was already ICF-folded there, so removing it frees
+nothing, and the restructure crosses a `.text` function-alignment boundary. Kept anyway — the same
+call the raw-ANSI refactor made (Windows win, single-digit-byte Linux drift it labels
+"byte-neutral"). Fidelity is preserved: cursor moves only, rendered output identical.
+
+### `codec::Model`: delete the parallel `total` Vec (Windows −180 B, Linux −12 B)
+
+The model kept `counts` (`[u16; 26]` per context) *and* a parallel `total: Vec<u32>` (one running
+total per context). But a context's total is **exactly the sum of its counts** — the invariant
+holds through every `update` (both `+= inc`) and every halving (`total` was recomputed from the
+halved counts, i.e. their sum). So it is never stored: `update` now sums the 26 counts to test the
+`LIMIT` trigger, and the whole `vec![0u32; n_ctx]` — a distinct `from_elem::<u32>` monomorphization
+plus the `Vec<u32>` drop path, compiled into the decoder since `Model::new` is on the corpus walk —
+is gone. The compressed stream is unchanged (`packed` stays 15,206 B; `corpus_round_trips` green);
+the extra summing fits the codec's standing "trade CPU for size" stance. **Windows 65,957 → 65,777
+(−180 B), Linux 85,691 → 85,679 (−12 B).**
+
+`counts` stays a `Vec`: its length is `27^order` with `order` varying during the build's model
+search, so it can't be a fixed array in the shared struct (same wall as the const-generic `ORDER`).
+Turning `pref` into a fixed inline array (dropping its `Vec<u16>`) was tried and **reverted** — it
+needs a `MAX_WORD_LEN` cap decoupled from the build-inferred `WORD_LEN`; a `Model<const WL>` template
+would keep `WORD_LEN` authoritative but the encoder (build-time `word_len`, inferred at runtime)
+can't name the const without a build-side length dispatch. Parked pending that decision.
 
 ### `/DEBUG:NONE`: drop the residual Debug Directory
 
@@ -374,14 +415,18 @@ Measured Linux: **118,608 → 89,903 (−28,705 B, −24 %)**; `nm` confirms `tp
 
 ## Stuck costs
 
-- **`parking_lot` (~3.3 KB) + the `supports_ansi` probe (~2.5 KB): `env::var` + a
-  `parking_lot::Once`, plus a `Colored::fmt`/`pad_integral` residue.** Both are anchored by
-  `crossterm::event`/`terminal` on Windows — the global `INTERNAL_EVENT_READER` mutex, and a
-  still-reachable `supports_ansi()`. **Confirmed stuck by experiment:** after moving *all* rendering
-  and terminal setup off crossterm's `style`/`Command` layer (see "Raw ANSI output") and even
-  stubbing out the last `execute!` (mouse) calls, `supports_ansi`/`env::var`/`Once` remain in the
-  binary. So the earlier belief that this ~2.5 KB was reclaimable "by bypassing style/Color" was
-  **wrong**: it is held by `event`/`terminal`, not by styling, and cannot go without dropping input.
+- ~~**`parking_lot` (~3.3 KB) held by `crossterm::event`/`terminal`, unreclaimable.**~~
+  **Reclaimed** (Windows −5,792 B, Linux −4,210 B). `parking_lot` had two live anchors, both global
+  `Mutex`es in the vendored crossterm: `INTERNAL_EVENT_READER` (`event.rs`) and
+  `TERMINAL_MODE_PRIOR_RAW_MODE` (`terminal/sys/unix.rs`, Linux only). The app is single-threaded, so
+  both were replaced with unsynchronized `UnsafeCell`s; `parking_lot` + `parking_lot_core` then drop
+  out entirely on both platforms. See `vendor/crossterm/LOCAL_PATCH.md` §2–3.
+- **The `supports_ansi` probe (`env::var` + `parking_lot::Once`) is NOT actually in the binary.**
+  cargo-bloat lists it, but it is dead: its call sites are DCE'd (the `TERM`/`NO_COLOR`/`COLORTERM`
+  strings are absent from the linked `.exe`, and neutralizing those functions changes the size by
+  0 B). This is a **cargo-bloat artifact** — with `/OPT:ICF` (identical-code folding) the tool
+  attributes a folded body to an arbitrary, often-dead symbol name. Treat its per-symbol output as a
+  hint, not ground truth; verify a candidate by string-probing the binary and by a measured rebuild.
 - On **stable**, the panic/backtrace machinery (~12 KB), io::error fmt (~3 KB) and env (~2 KB) are
   unavoidably linked by the panic runtime — the `backtrace` lever above only exists on nightly.
 - **Linux `.eh_frame` + `.eh_frame_hdr` (~18.6 KB).** Unwind tables from the *prebuilt* std. Dead
@@ -400,8 +445,19 @@ Measured Linux: **118,608 → 89,903 (−28,705 B, −24 %)**; `nm` confirms `tp
 - Baseline: 396,288
 - Stable optimized (default, no prerequisites): **214,016** (−46.0%)
 - build-std nightly, no `backtrace`, terminal still restored: **117,248** (−70.4%)
-- + immediate-abort, **Windows** (terminal not restored on panic): **72,061** (−81.8%)
-- + immediate-abort, **Linux** (x86_64-unknown-linux-gnu, vendored crossterm): **89,903** (−77.3%)
+- + immediate-abort, **Windows** (terminal not restored on panic): **65,777** (−83.4%)
+- + immediate-abort, **Linux** (x86_64-unknown-linux-gnu, vendored crossterm): **85,679** (−78.4%)
+
+Latest src wins (see the two subsections above):
+- **`codec::Model` deletes the parallel `total` Vec** — Windows 65,957 → 65,777 (−180 B),
+  Linux 85,691 → 85,679 (−12 B).
+- **`ui::render` home-once + CNL** — Windows 66,053 → 65,957 (−96 B), Linux 85,683 → 85,691 (+8 B,
+  `lld` ICF/alignment; kept for the Windows gain).
+
+The prior round dropped `parking_lot` (single-threaded `UnsafeCell`s in place of crossterm's two
+global `Mutex`es — Windows −5,792 B, Linux −4,210 B; see `vendor/crossterm/LOCAL_PATCH.md` §2–3) and
+removed the decoder's per-word heap `Vec` (fixed `[u8; WORD_LEN]` buffers in `codec::decode_word` /
+`words::Corpus` — Windows −216 B). Previously: Windows 72,061, Linux 89,903.
 
 The two immediate-abort figures are the current numbers, after the arithmetic-coded data layer, the
 raw-ANSI output refactor, and the vendored ioctl-only `size()`; the stable / build-std-with-restore

@@ -20,7 +20,7 @@ static CORPUS_RAW: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/corpus.bin"
 struct Corpus {
     dec: RangeDecoder<'static>,
     model: Model,
-    prev: Option<Vec<u8>>,
+    prev: Option<[u8; WORD_LEN]>,
     remaining: u32,
     remaining_answers: u32,
     left: usize,
@@ -40,13 +40,14 @@ impl Corpus {
 }
 
 impl Iterator for Corpus {
-    type Item = (Vec<u8>, bool);
+    type Item = ([u8; WORD_LEN], bool);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.left = self.left.checked_sub(1)?;
-        let word = decode_word(&mut self.dec, &mut self.model, self.prev.as_deref(), WORD_LEN);
+        let mut word = [0u8; WORD_LEN];
+        decode_word(&mut self.dec, &mut self.model, self.prev.as_ref().map(|w| &w[..]), &mut word);
         let is_answer = decode_color(&mut self.dec, &mut self.remaining, &mut self.remaining_answers);
-        self.prev = Some(word.clone());
+        self.prev = Some(word);
         Some((word, is_answer))
     }
 }
@@ -60,7 +61,7 @@ fn xorshift64(x: u64) -> u64 {
 // Membership test over the corpus (colour ignored: every word, answer or valid, counts).
 // The corpus is sorted, so the scan stops as soon as it passes where `word` would be.
 pub fn is_valid(word: &[u8]) -> bool {
-    let target: Vec<u8> = word.iter().map(|b| b - b'a').collect();
+    let target: [u8; WORD_LEN] = std::array::from_fn(|i| word[i] - b'a');
     for (w, _) in Corpus::new() {
         match w.cmp(&target) {
             Ordering::Equal => return true,
@@ -108,12 +109,11 @@ mod tests {
     #[test]
     fn corpus_round_trips() {
         let mut answers = 0;
-        let mut prev: Option<Vec<u8>> = None;
+        let mut prev: Option<[u8; WORD_LEN]> = None;
         for (n, (w, is_answer)) in Corpus::new().enumerate() {
-            assert_eq!(w.len(), WORD_LEN);
             assert!(w.iter().all(|&c| c < 26), "word {n} has a non-letter symbol");
             if let Some(p) = &prev {
-                assert!(w.as_slice() > p.as_slice(), "word {n} is not strictly after the previous");
+                assert!(w > *p, "word {n} is not strictly after the previous");
             }
             if is_answer {
                 answers += 1;

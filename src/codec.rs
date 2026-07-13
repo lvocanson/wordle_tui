@@ -150,8 +150,10 @@ pub fn common_prefix(a: &[u8], b: &[u8]) -> usize {
 
 pub struct Model {
     // Character frequencies per context; effective frequency is count + 1 (add-one smoothing).
+    // A context's running total is not stored: it is exactly the sum of its counts (the invariant
+    // holds through every update and halving), so it is recomputed on demand instead of cached in
+    // a parallel Vec.
     counts: Vec<[u16; 26]>,
-    total: Vec<u32>,
     // Prefix-length model over 0..word_len, same smoothing.
     pref: Vec<u16>,
     pref_total: u32,
@@ -164,7 +166,6 @@ impl Model {
         let n_ctx = CTX_SYMS.pow(order as u32);
         Model {
             counts: vec![[0u16; 26]; n_ctx],
-            total: vec![0u32; n_ctx],
             pref: vec![0u16; word_len],
             pref_total: 0,
             order,
@@ -222,14 +223,11 @@ impl Model {
 
     pub fn update(&mut self, ctx: usize, sym: usize) {
         self.counts[ctx][sym] += self.inc;
-        self.total[ctx] += self.inc as u32;
-        if self.total[ctx] >= LIMIT {
-            let mut t = 0;
+        let t: u32 = self.counts[ctx].iter().map(|&c| c as u32).sum();
+        if t >= LIMIT {
             for c in self.counts[ctx].iter_mut() {
                 *c >>= 1;
-                t += *c as u32;
             }
-            self.total[ctx] = t;
         }
     }
 
@@ -280,31 +278,33 @@ impl Model {
 }
 
 // Decode one word (values 0..25) given the previous word, mirroring the encoder in build.rs.
-pub fn decode_word(dec: &mut RangeDecoder, m: &mut Model, prev: Option<&[u8]>, word_len: usize) -> Vec<u8> {
+// The word is written into `out`; `out.len()` is the word length. No heap word buffer: the caller
+// owns a fixed `[u8; WORD_LEN]`, so the whole per-word Vec/clone/grow machinery stays out of the
+// decoder (the corpus is walked word by word thousands of times per lookup).
+pub fn decode_word(dec: &mut RangeDecoder, m: &mut Model, prev: Option<&[u8]>, out: &mut [u8]) {
+    let word_len = out.len();
     let dv = dec.decode_freq(m.pref_tot());
     let (p, cum, f) = m.pref_find(dv);
     dec.decode_update(cum, f);
     m.pref_update(p);
 
-    let mut w = vec![0u8; word_len];
     let floor: i32 = match prev {
         Some(pv) => {
-            w[..p].copy_from_slice(&pv[..p]);
+            out[..p].copy_from_slice(&pv[..p]);
             pv[p] as i32
         }
         None => -1,
     };
 
     for i in p..word_len {
-        let ctx = m.ctx(&w, i);
+        let ctx = m.ctx(out, i);
         let lo = if i == p { (floor + 1) as usize } else { 0 };
         let dv = dec.decode_freq(m.char_tot(ctx, lo));
         let (sym, cum, f) = m.char_find(ctx, lo, dv);
         dec.decode_update(cum, f);
-        w[i] = sym as u8;
+        out[i] = sym as u8;
         m.update(ctx, sym);
     }
-    w
 }
 
 // Decode the colour bit that follows each word: true = colour A. Sampling without replacement,

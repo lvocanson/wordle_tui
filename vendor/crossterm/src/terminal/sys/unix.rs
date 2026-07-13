@@ -11,13 +11,13 @@ use libc::{
     cfmakeraw, ioctl, tcgetattr, tcsetattr, termios as Termios, winsize, STDOUT_FILENO, TCSANOW,
     TIOCGWINSZ,
 };
-use parking_lot::Mutex;
 #[cfg(not(feature = "libc"))]
 use rustix::{
     fd::AsFd,
     termios::{Termios, Winsize},
 };
 
+use std::cell::UnsafeCell;
 use std::{fs::File, io, process};
 #[cfg(feature = "libc")]
 use std::{
@@ -27,7 +27,23 @@ use std::{
 
 // Some(Termios) -> we're in the raw mode and this is the previous mode
 // None -> we're not in the raw mode
-static TERMINAL_MODE_PRIOR_RAW_MODE: Mutex<Option<Termios>> = parking_lot::const_mutex(None);
+//
+// LOCAL PATCH — see vendor/crossterm/LOCAL_PATCH.md. Upstream guards this behind a
+// `parking_lot::Mutex`; this app is single-threaded (one event-loop thread), so a bare cell drops
+// `parking_lot`/`parking_lot_core` — the analogue of the event-reader patch, for the Linux side.
+struct RawModeCell(UnsafeCell<Option<Termios>>);
+// SAFETY: touched only from the single thread that enables/disables raw mode; `Sync` is required
+// only to place it in a `static`.
+unsafe impl Sync for RawModeCell {}
+impl RawModeCell {
+    // SAFETY: single-threaded, non-reentrant access — the returned `&mut` is used and dropped
+    // within one raw-mode call, never aliased.
+    #[allow(clippy::mut_from_ref)]
+    fn lock(&self) -> &mut Option<Termios> {
+        unsafe { &mut *self.0.get() }
+    }
+}
+static TERMINAL_MODE_PRIOR_RAW_MODE: RawModeCell = RawModeCell(UnsafeCell::new(None));
 
 pub(crate) fn is_raw_mode_enabled() -> bool {
     TERMINAL_MODE_PRIOR_RAW_MODE.lock().is_some()
@@ -108,7 +124,7 @@ pub(crate) fn size() -> io::Result<(u16, u16)> {
 
 #[cfg(feature = "libc")]
 pub(crate) fn enable_raw_mode() -> io::Result<()> {
-    let mut original_mode = TERMINAL_MODE_PRIOR_RAW_MODE.lock();
+    let original_mode = TERMINAL_MODE_PRIOR_RAW_MODE.lock();
     if original_mode.is_some() {
         return Ok(());
     }
@@ -126,7 +142,7 @@ pub(crate) fn enable_raw_mode() -> io::Result<()> {
 
 #[cfg(not(feature = "libc"))]
 pub(crate) fn enable_raw_mode() -> io::Result<()> {
-    let mut original_mode = TERMINAL_MODE_PRIOR_RAW_MODE.lock();
+    let original_mode = TERMINAL_MODE_PRIOR_RAW_MODE.lock();
     if original_mode.is_some() {
         return Ok(());
     }
@@ -148,7 +164,7 @@ pub(crate) fn enable_raw_mode() -> io::Result<()> {
 /// effectively disabling the raw mode and doing nothing else.
 #[cfg(feature = "libc")]
 pub(crate) fn disable_raw_mode() -> io::Result<()> {
-    let mut original_mode = TERMINAL_MODE_PRIOR_RAW_MODE.lock();
+    let original_mode = TERMINAL_MODE_PRIOR_RAW_MODE.lock();
     if let Some(original_mode_ios) = original_mode.as_ref() {
         let tty = tty_fd()?;
         set_terminal_attr(tty.raw_fd(), original_mode_ios)?;
@@ -160,7 +176,7 @@ pub(crate) fn disable_raw_mode() -> io::Result<()> {
 
 #[cfg(not(feature = "libc"))]
 pub(crate) fn disable_raw_mode() -> io::Result<()> {
-    let mut original_mode = TERMINAL_MODE_PRIOR_RAW_MODE.lock();
+    let original_mode = TERMINAL_MODE_PRIOR_RAW_MODE.lock();
     if let Some(original_mode_ios) = original_mode.as_ref() {
         let tty = tty_fd()?;
         set_terminal_attr(&tty, original_mode_ios)?;

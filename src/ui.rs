@@ -457,24 +457,17 @@ pub fn build_grid(w: usize, h: usize, game: &Game, message: Option<&str>, contro
 // ----------------------------------------------------------------------------
 
 pub fn render<W: Write>(out: &mut W, grid: &Grid) -> std::io::Result<()> {
+    // Home the cursor once (CSI H), then step down one row at a time with CNL (CSI E, what
+    // crossterm's MoveToNextLine emits) instead of an absolute MoveTo(0, y) per row. Every row
+    // paints exactly `width` printable ASCII glyphs (SGR escapes don't move the cursor), so after
+    // a row the cursor sits at the right margin and CNL brings it to column 1 of the next line —
+    // deterministic, and it drops the per-row base-10 formatting of the row number. The move is
+    // emitted only *between* rows (never after the last), so it can't scroll at the bottom edge.
+    out.write_all(b"\x1b[H")?;
     for y in 0..grid.height {
-        // MoveTo(0, y): CSI row+1 ;1 H — x is always 0, so the column is a literal 1.
-        out.write_all(b"\x1b[")?;
-        {
-            let mut buf = [0u8; 5];
-            let mut i = buf.len();
-            let mut y = y + 1;
-            loop {
-                i -= 1;
-                buf[i] = b'0' + (y % 10) as u8;
-                y /= 10;
-                if y == 0 {
-                    break;
-                }
-            }
-            out.write_all(&buf[i..])?;
+        if y > 0 {
+            out.write_all(b"\x1b[E")?;
         }
-        out.write_all(b";1H")?;
         let mut x = 0;
         while x < grid.width {
             let start = y * grid.width + x;
