@@ -47,10 +47,13 @@ note is kept here as a record of how the rewrite's fidelity was established.
 
 The data went through several encodings (3-byte base-26 → LEB128 gaps → streaming varint) and is
 now a single **arithmetic-coded union** of both word lists (`src/codec.rs`, built by
-`build/`): 14,853 words in `union.bin` at **~15.2 KB** (~1.02 B/word), searched by walking the
-stream. Compression is essentially at the information-theoretic limit; nothing more to shave on
-the data side. The encoder (build) and decoder (game) share `codec.rs` verbatim so they agree
-bit-for-bit — a `union_round_trips` test guards this.
+`build/`): 14,853 words in `corpus.bin` at **~13.9 KB** (~0.96 B/word), searched by walking the
+stream. The residual colour partition (answer vs. valid-only) is ~1.0 KB after conditioning it on
+the last letter (see "Conditioned colour bit"); what is left there is human-curation entropy no
+letter model predicts. The encoder (build) and decoder (game) share `codec.rs`'s range coder and model
+*math* so they agree bit-for-bit — a round-trip test guards this — but no longer its *storage*:
+the encoder holds its model counts in `Vec`s (it searches `order`/`inc`), the decoder in fixed
+arrays sized by the baked-in constants (see "Asymmetric decoder" below).
 
 ## Measuring (`tools/stats.rs`, `cargo run --example stats`)
 
@@ -267,8 +270,8 @@ the `union_round_trips` test). They carry a source comment pointing here:
    `char_tot(ctx, lo)` with `lo == 26` (empty sum), which needs a word whose first differing
    character exceeds `'z'`. The sort proves `w[p] > prev[p]` with `w[p] <= 25`, so
    `prev[p] <= 24` ⟹ `lo <= 25` ⟹ at least the `s = 25` term ⟹ `char_tot >= 1`. The colour
-   decode's `remaining` likewise stays in `1..=WORD_COUNT`, and zero `freq` values are excluded
-   by the sampling-without-replacement logic.
+   decode feeds `decode_freq(f0 + f1)` with `f0, f1 >= 1` (add-one smoothing), so its total is
+   always `>= 2`; no divide-by-zero there regardless of the data.
 
 No runtime `assert!` was added to "lock" these: that would create panic sites and grow the
 binary — the opposite of the goal. The invariant is enforced where it belongs, at build time.
@@ -333,12 +336,111 @@ is gone. The compressed stream is unchanged (`packed` stays 15,206 B; `corpus_ro
 the extra summing fits the codec's standing "trade CPU for size" stance. **Windows 65,957 → 65,777
 (−180 B), Linux 85,691 → 85,679 (−12 B).**
 
-`counts` stays a `Vec`: its length is `27^order` with `order` varying during the build's model
-search, so it can't be a fixed array in the shared struct (same wall as the const-generic `ORDER`).
-Turning `pref` into a fixed inline array (dropping its `Vec<u16>`) was tried and **reverted** — it
-needs a `MAX_WORD_LEN` cap decoupled from the build-inferred `WORD_LEN`; a `Model<const WL>` template
-would keep `WORD_LEN` authoritative but the encoder (build-time `word_len`, inferred at runtime)
-can't name the const without a build-side length dispatch. Parked pending that decision.
+`counts` stayed a `Vec` here because its length is `27^order` with `order` varying during the
+build's model search, so it can't be a fixed array in a *shared* struct (same wall as the
+const-generic `ORDER`); turning `pref` into a fixed inline array had the same problem (a
+`MAX_WORD_LEN` cap decoupled from the build-inferred `WORD_LEN`). Both were **parked pending a
+decision** — later resolved by splitting the decoder's storage from the encoder's (see "Asymmetric
+decoder"), which is what unlocks the fixed arrays on the decoder side.
+
+### Position-conditioned context (Windows −696 B)
+
+The adaptive char model conditioned only on the previous `ORDER` characters — position in the word
+was **not** part of the context, so all five slots shared one set of statistics. But fixed-length
+words are strongly positional (the letters likely at slot 0 differ sharply from slot 4), so folding
+the position into the context index is a large, cheap win. It is exposed as a new searched knob,
+`use_pos` (`build/encode.rs`), baked into `constants.rs` as `USE_POS` alongside `ORDER`/`INC` — a
+zero-byte channel, since the decoder const-folds it (`codec::ctx` multiplies the position in only
+when `USE_POS`, `codec::n_ctx` sizes the table accordingly). The build searches `{order 1..3} ×
+{pos off/on} × {inc 1..32}` and picks the smallest.
+
+Measured on this corpus the winner is **pos + order-1** (`27·5 = 135` contexts): **blob 15,206 →
+14,449 B (−757 B, 1.02 → 0.97 B/word)**. Order-2 and order-3 lose either way (the table outruns the
+data); position + order-1 beats plain order-1 decisively. Searching extra knobs on top (a separate
+`inc` for the prefix vs. char model, a tunable halving `LIMIT`) buys only ~35 B more and overfits
+the corpus — not worth two more constants, so left out. The decoder gains one `idx * WORD_LEN + i`
+in `ctx` (const-folded multiply-add) and a larger stack count table (135·26·2 = 7020 B, still cheap
+to zero per lookup; the `const` assert still guards against a scheme too big for the stack).
+
+**Windows 65,169 → 64,473 (−696 B):** the −757 B of blob, less ~61 B of the position arithmetic in
+`ctx`. `corpus_round_trips` stays green — the decoder rebuilds the identical position-aware model.
+
+### Conditioned colour bit (Windows −176 B)
+
+The per-word colour bit (answer vs. valid-only) was coded by exact sampling-without-replacement:
+optimal *if the answer subset is structureless*, spending `log2 C(14853, 2339) ≈ 1166 B`. But it is
+not structureless — Wordle answers avoid plurals, so a word's **last letter** predicts its colour
+(words ending `-s`: 0.9 % answers vs. 21.9 % otherwise). Replacing SWOR with a small **adaptive
+binary model conditioned on one build-searched letter** (`USE_COLOR`/`COLOR_POS`, here the last
+letter) captures that: colour cost `1166 → ~1000 B`. The model is adaptive, so nothing is stored —
+the `[[u32; 2]; 26]` count table lives on the stack, not in the binary.
+
+Which letter is searched, not assumed: `best_model` tries the shared model and each position, and
+per-position measurement is unambiguous — only the last letter carries real signal (position 4:
+−167 B; positions 0–3: −10..−20 B each). Combining positions does **not** help: a product context
+over two letters over-sparsifies (`{first,last}` = 676 contexts, *worse* than last alone; all five
+= 26⁵ contexts seen once each ≈ 1 bit/word), and a naive-Bayes mix of per-letter models tops out at
+~−11 B over last-alone (a float ceiling) for far more decoder code — a net loss. So the best
+"combination among the five positions" is the single last letter.
+
+**Windows 64,473 → 64,297 (−176 B):** −166 B of blob (14,449 → 14,283, 0.96 B/word) plus ~10 B
+because the adaptive decoder (`decode_color` + one stack table) is actually *smaller* code than
+SWOR's `remaining`/`remaining_answers` bookkeeping and its two `Corpus` fields. `corpus_round_trips`
+stays green (bit-exact colour model on both ends).
+
+### Searched word ordering (0 B this corpus; not code-neutral across schemes)
+
+The stored order was implicitly forward-lexicographic-ascending. That is not assumed any more: two
+booleans, `REVERSE_WORD` (store words reversed → share suffixes instead of prefixes) and `DESCENDING`
+(sort direction), are searched by the build across all four combinations and baked into
+`constants.rs`, exactly like `USE_POS`. The decoder honours them through const-folded branches: the
+first differing character is bounded `[floor+1, 26)` ascending / `[0, floor)` descending, and
+`is_valid`/`pick_target` reverse the key when `REVERSE_WORD`. The `corpus_round_trips` guarantee
+holds for every scheme (validated by an out-of-tree encode+decode round-trip of all four).
+
+For this corpus forward-ascending still wins the blob (14,449 B; reversed-asc 14,483, fwd-desc
+14,503, rev-desc 14,562), so the baked constants are `false/false` and **the decoder compiles
+byte-identically to before — 64,473 B, a genuine 0-cost addition** (the non-chosen branches are DCE'd).
+
+**But the four schemes are *not* code-size-neutral**, measured by pinning each ordering (non-blob =
+total − blob): fwd-asc **50,024**, fwd-desc 50,066, rev-asc 50,006, rev-desc 50,167 — a 161 B spread.
+Reason: ascending's upper bound is the constant `26`, which `char_tot`/`char_find` fold away;
+descending's upper bound is `prev[p]` (runtime), so those loops keep a dynamic bound and compile
+larger (up to +143 B for rev-desc). Consequence worth remembering: the build minimises the *blob* as
+a proxy, but for the *ordering* dimension that proxy is blind to a decoder-code delta of ~140 B, so
+on a future word list a blob-only pick could be off by that much. Here it is moot (forward-ascending
+is smallest on both blob and code); if it ever mattered, `best_model` would need to add a per-scheme
+code penalty. Kept as-is: correct, data-driven, and free on the shipped binary.
+
+### Asymmetric decoder: fixed-array model storage (Windows −608 B, Linux +24 B)
+
+`codec.rs` used to hold one `Model` struct used verbatim by both ends. That forced its storage to
+be `Vec`s: the **encoder** searches `order`/`inc`/`word_len`, so it genuinely needs runtime-sized
+tables. But the **decoder** only ever runs the single winning `ORDER`/`INC`/`WORD_LEN`, baked into
+`constants.rs` as compile-time constants — it never needed a `Vec`. The shared struct was the only
+thing forcing one on it (the wall behind the two parked notes above and the rejected const-generic
+`ORDER`: sizing `[[u16; 26]; 27^ORDER]` in the *shared* type would need `generic_const_exprs`).
+
+The fix keeps the guarantee that matters and drops the constraint that didn't. `codec.rs` now
+exposes the range coder **and the model math as storage-agnostic free functions** (they take a
+`&[u16; 26]` count row / `&[u16]` prefix slice); the two ends each own a thin storage wrapper that
+delegates to them — the encoder's `Vec`-backed `Model` (moved to `build/encode.rs`), the decoder's
+array-backed `DecodeModel` (`src/words.rs`): `counts: [[u16; 26]; 27^ORDER]`, `pref: [u16; WORD_LEN]`.
+Single source of truth for the probabilities, so encode/decode still agree bit-for-bit
+(`corpus_round_trips` green, `packed` unchanged at 15,206 B); only the container differs.
+
+That deletes both `vec![[0u16; 26]; …]` and `vec![0u16; …]` from the decoder — the two
+`from_elem` monomorphizations, the `RawVec` alloc, and the drop/dealloc glue, all of which sat on
+the corpus walk (`Corpus::new` runs per lookup). **Windows 65,777 → 65,169 (−608 B: `.text` −576,
+`.pdata` −24, `.rdata` −8).** At `ORDER = 1` the `counts` array is 27·26·2 = 1404 B, cheap to zero
+on the stack per lookup; a `const` assertion refuses to compile if a future corpus pushed `ORDER`
+past 2 (≈1 MB, stack-busting — box it there instead).
+
+**Linux +24 B (85,679 → 85,703).** No real code was added — the decoder is smaller there too — but
+Linux keeps a full allocator anyway (crossterm's Unix input stack allocates), so dropping the
+decoder's two `Vec`s frees almost nothing, and the restructure crosses an `lld` ICF/function-
+alignment boundary. Same call as the raw-ANSI and home-once/CNL refactors: a real Windows win for
+a few bytes of documented Linux alignment drift. Kept.
 
 ### `/DEBUG:NONE`: drop the residual Debug Directory
 
@@ -438,17 +540,25 @@ Measured Linux: **118,608 → 89,903 (−28,705 B, −24 %)**; `nm` confirms `tp
   (The `tput` spawn cluster, once the biggest Linux stuck cost at ~28.7 KB, is now **reclaimed** —
   see "Vendored crossterm" above.)
 - Everything else in `.text` is either ours (`main`, `ui::build_grid`, `app::submit`,
-  `codec::decode_word`) or genuinely-used std/crossterm.
+  `words::decode_word`) or genuinely-used std/crossterm.
 
 ## Summary
 
 - Baseline: 396,288
 - Stable optimized (default, no prerequisites): **214,016** (−46.0%)
 - build-std nightly, no `backtrace`, terminal still restored: **117,248** (−70.4%)
-- + immediate-abort, **Windows** (terminal not restored on panic): **65,777** (−83.4%)
-- + immediate-abort, **Linux** (x86_64-unknown-linux-gnu, vendored crossterm): **85,679** (−78.4%)
+- + immediate-abort, **Windows** (terminal not restored on panic): **64,297** (−83.8%)
+- + immediate-abort, **Linux** (x86_64-unknown-linux-gnu, vendored crossterm): **85,703** (−78.4%, pre-position/colour; not re-measured)
 
-Latest src wins (see the two subsections above):
+Latest src wins (see the subsections above):
+- **Conditioned colour bit** — Windows 64,473 → 64,297 (−176 B); blob 14,449 → 14,283 (−166 B,
+  0.96 B/word). Colour `1166 → ~1000 B` by conditioning on the last letter. Linux not re-measured.
+- **Position-conditioned context** — Windows 65,169 → 64,473 (−696 B); blob 15,206 → 14,449
+  (−757 B, 0.97 B/word). Linux not re-measured this round.
+- **Searched word ordering** (`REVERSE_WORD`/`DESCENDING`) — 0 B this corpus (forward-ascending
+  still wins, const-folds to identical code); robustness for a future list, not a size win.
+- **Asymmetric decoder: fixed-array model storage** — Windows 65,777 → 65,169 (−608 B),
+  Linux 85,679 → 85,703 (+24 B, `lld` ICF/alignment; kept for the Windows gain).
 - **`codec::Model` deletes the parallel `total` Vec** — Windows 65,957 → 65,777 (−180 B),
   Linux 85,691 → 85,679 (−12 B).
 - **`ui::render` home-once + CNL** — Windows 66,053 → 65,957 (−96 B), Linux 85,683 → 85,691 (+8 B,
@@ -456,7 +566,7 @@ Latest src wins (see the two subsections above):
 
 The prior round dropped `parking_lot` (single-threaded `UnsafeCell`s in place of crossterm's two
 global `Mutex`es — Windows −5,792 B, Linux −4,210 B; see `vendor/crossterm/LOCAL_PATCH.md` §2–3) and
-removed the decoder's per-word heap `Vec` (fixed `[u8; WORD_LEN]` buffers in `codec::decode_word` /
+removed the decoder's per-word heap `Vec` (fixed `[u8; WORD_LEN]` buffers in `decode_word` /
 `words::Corpus` — Windows −216 B). Previously: Windows 72,061, Linux 89,903.
 
 The two immediate-abort figures are the current numbers, after the arithmetic-coded data layer, the

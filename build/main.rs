@@ -63,9 +63,9 @@ fn main() {
         .map(|w| (w.word.symbols(), matches!(w.kind, WordKind::Answer)))
         .collect();
 
-    let (order, inc, blob) = best_model(&corpus, answer_count as u32, word_len);
+    let best = best_model(&corpus, word_len);
 
-    fs::write(out.join("corpus.bin"), &blob)
+    fs::write(out.join("corpus.bin"), &best.blob)
         .unwrap_or_else(|e| panic!("cannot write corpus.bin: {e}"));
     fs::write(
         out.join("constants.rs"),
@@ -73,10 +73,22 @@ fn main() {
             "pub const WORD_LEN: usize = {word_len};\n\
              pub const WORD_COUNT: usize = {};\n\
              pub const ANSWER_COUNT: usize = {answer_count};\n\
-             pub const ORDER: usize = {order};\n\
-             pub const INC: u16 = {inc};\n\
+             pub const ORDER: usize = {};\n\
+             pub const USE_POS: bool = {};\n\
+             pub const INC: u16 = {};\n\
+             pub const REVERSE_WORD: bool = {};\n\
+             pub const DESCENDING: bool = {};\n\
+             pub const USE_COLOR: bool = {};\n\
+             pub const COLOR_POS: usize = {};\n\
              pub const MAX_GUESSES: usize = {max_guesses};\n",
             corpus.len(),
+            best.order,
+            best.use_pos,
+            best.inc,
+            best.reverse_word,
+            best.descending,
+            best.use_color,
+            best.color_pos,
         ),
     )
     .unwrap_or_else(|e| panic!("cannot write constants.rs: {e}"));

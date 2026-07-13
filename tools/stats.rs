@@ -56,8 +56,10 @@ fn print_compression() {
     }
     println!("{}", size_line("source", source, source));
     println!("{}", size_line("packed", packed, source));
-    println!("-> {:.2} B/word - encoder order {ORDER}, inc {INC}",
+    println!("-> {:.2} B/word - encoder order {ORDER}{}, inc {INC}, colour {}",
         packed as f64 / WORD_COUNT as f64,
+        if USE_POS { "+pos" } else { "" },
+        if USE_COLOR { format!("@{COLOR_POS}") } else { "global".to_string() },
     );
 }
 

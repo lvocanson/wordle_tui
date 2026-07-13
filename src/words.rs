@@ -5,7 +5,7 @@
 use std::cmp::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::codec::{decode_color, decode_word, Model, RangeDecoder};
+use crate::codec::{self, decode_color, RangeDecoder};
 
 include!(concat!(env!("OUT_DIR"), "/constants.rs"));
 
@@ -14,15 +14,89 @@ include!(concat!(env!("OUT_DIR"), "/constants.rs"));
 // adaptive model as it goes. No word is ever held in a table: the trade is CPU for size.
 static CORPUS_RAW: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/corpus.bin"));
 
+// Number of contexts for the chosen scheme (`27^ORDER`, times `WORD_LEN` when `USE_POS`). On the
+// decoder these are compile-time constants, so the count table is a fixed array rather than the
+// encoder's `Vec` — no heap allocation, no `from_elem`/drop glue in the binary (this is the whole
+// reason the decoder's model storage is split from the encoder's; the shared probability math lives
+// in codec.rs). Guard the stack cost: the winning scheme here is pos+order1 = 27·5 = 135 contexts,
+// a 135·26·2 = 7020 B table, fine per-lookup on the stack; a much larger scheme (e.g. order-3, ~1 MB)
+// would blow the stack, so refuse to compile it silently — box the counts there instead.
+const DEC_CTX: usize = codec::n_ctx(ORDER, USE_POS, WORD_LEN);
+const _: () = assert!(
+    DEC_CTX <= codec::MAX_STACK_CTX,
+    "decoder count table too large for a stack array; box DecodeModel.counts for this scheme",
+);
+
+// The decoder's adaptive model: fixed-size counterpart of the encoder's `Model` (build/encode.rs),
+// sized entirely by the `ORDER`/`WORD_LEN` constants. Both feed the same storage-agnostic math in
+// codec.rs, so they stay bit-exact by construction.
+struct DecodeModel {
+    counts: [[u16; 26]; DEC_CTX],
+    pref: [u16; WORD_LEN],
+    pref_total: u32,
+    // Adaptive colour model: [not-answer, answer] counts per context (one letter, or a single
+    // shared model). See codec::decode_color. The table is on the stack, so its size is not binary.
+    color: [[u32; 2]; codec::color_nctx(USE_COLOR)],
+}
+
+impl DecodeModel {
+    fn new() -> Self {
+        DecodeModel {
+            counts: [[0u16; 26]; DEC_CTX],
+            pref: [0u16; WORD_LEN],
+            pref_total: 0,
+            color: [[0u32; 2]; codec::color_nctx(USE_COLOR)],
+        }
+    }
+}
+
+// Decode one word (values 0..25) given the previous word, mirroring encode_word in build/encode.rs.
+// The word is written into `out`; `out.len()` is the word length. No heap word buffer: the caller
+// owns a fixed `[u8; WORD_LEN]`, so the whole per-word Vec/clone/grow machinery stays out of the
+// decoder (the corpus is walked word by word thousands of times per lookup).
+fn decode_word(dec: &mut RangeDecoder, m: &mut DecodeModel, prev: Option<&[u8]>, out: &mut [u8]) {
+    let dv = dec.decode_freq(codec::pref_tot(&m.pref, m.pref_total));
+    let (p, cum, f) = codec::pref_find(&m.pref, dv);
+    dec.decode_update(cum, f);
+    codec::pref_update(&mut m.pref, &mut m.pref_total, INC, p);
+
+    let floor: Option<usize> = match prev {
+        Some(pv) => {
+            out[..p].copy_from_slice(&pv[..p]);
+            Some(pv[p] as usize)
+        }
+        None => None,
+    };
+
+    for i in p..out.len() {
+        let ctx = codec::ctx(ORDER, USE_POS, WORD_LEN, out, i);
+        // The first differing character is bounded to one side of prev[p] by the stored sort
+        // direction (`DESCENDING` const-folds this to the ascending `[floor+1, 26)` path here).
+        let (lo, hi) = match floor {
+            Some(f) if i == p => {
+                if DESCENDING {
+                    (0, f)
+                } else {
+                    (f + 1, 26)
+                }
+            }
+            _ => (0, 26),
+        };
+        let dv = dec.decode_freq(codec::char_tot(&m.counts[ctx], lo, hi));
+        let (sym, cum, f) = codec::char_find(&m.counts[ctx], lo, hi, dv);
+        dec.decode_update(cum, f);
+        out[i] = sym as u8;
+        codec::count_update(&mut m.counts[ctx], INC, sym);
+    }
+}
+
 // One left-to-right pass over the corpus, yielding each `(word, is_answer)` in sorted order.
 // Every consumer is just a walk, so the decoder/model/count bookkeeping lives here once; the
-// counts feed the colour bit's sampling-without-replacement, `is_answer` being colour A.
+// adaptive colour model in `model` decodes `is_answer` after each word.
 struct Corpus {
     dec: RangeDecoder<'static>,
-    model: Model,
+    model: DecodeModel,
     prev: Option<[u8; WORD_LEN]>,
-    remaining: u32,
-    remaining_answers: u32,
     left: usize,
 }
 
@@ -30,10 +104,8 @@ impl Corpus {
     fn new() -> Self {
         Corpus {
             dec: RangeDecoder::new(CORPUS_RAW),
-            model: Model::new(WORD_LEN, ORDER, INC),
+            model: DecodeModel::new(),
             prev: None,
-            remaining: WORD_COUNT as u32,
-            remaining_answers: ANSWER_COUNT as u32,
             left: WORD_COUNT,
         }
     }
@@ -46,7 +118,8 @@ impl Iterator for Corpus {
         self.left = self.left.checked_sub(1)?;
         let mut word = [0u8; WORD_LEN];
         decode_word(&mut self.dec, &mut self.model, self.prev.as_ref().map(|w| &w[..]), &mut word);
-        let is_answer = decode_color(&mut self.dec, &mut self.remaining, &mut self.remaining_answers);
+        let cc = codec::color_ctx(&word, USE_COLOR, COLOR_POS);
+        let is_answer = decode_color(&mut self.dec, &mut self.model.color[cc]);
         self.prev = Some(word);
         Some((word, is_answer))
     }
@@ -61,12 +134,18 @@ fn xorshift64(x: u64) -> u64 {
 // Membership test over the corpus (colour ignored: every word, answer or valid, counts).
 // The corpus is sorted, so the scan stops as soon as it passes where `word` would be.
 pub fn is_valid(word: &[u8]) -> bool {
-    let target: [u8; WORD_LEN] = std::array::from_fn(|i| word[i] - b'a');
+    // The stream stores keys (words reversed when `REVERSE_WORD`), sorted in the `DESCENDING`
+    // direction; compare in that same key space and stop once the scan passes where the key sits.
+    let target: [u8; WORD_LEN] = std::array::from_fn(|i| {
+        let src = if REVERSE_WORD { WORD_LEN - 1 - i } else { i };
+        word[src] - b'a'
+    });
     for (w, _) in Corpus::new() {
         match w.cmp(&target) {
             Ordering::Equal => return true,
-            Ordering::Greater => return false,
-            Ordering::Less => {}
+            Ordering::Greater if !DESCENDING => return false,
+            Ordering::Less if DESCENDING => return false,
+            _ => {}
         }
     }
     false
@@ -87,7 +166,11 @@ pub fn pick_target(seed: u64) -> [u8; WORD_LEN] {
     for (w, is_answer) in Corpus::new() {
         if is_answer {
             if seen == idx {
-                return std::array::from_fn(|i| b'a' + w[i]);
+                // `w` is the stored key; undo the `REVERSE_WORD` transform to recover the word.
+                return std::array::from_fn(|i| {
+                    let src = if REVERSE_WORD { WORD_LEN - 1 - i } else { i };
+                    b'a' + w[src]
+                });
             }
             seen += 1;
         }
@@ -113,7 +196,8 @@ mod tests {
         for (n, (w, is_answer)) in Corpus::new().enumerate() {
             assert!(w.iter().all(|&c| c < 26), "word {n} has a non-letter symbol");
             if let Some(p) = &prev {
-                assert!(w > *p, "word {n} is not strictly after the previous");
+                let ordered = if DESCENDING { w < *p } else { w > *p };
+                assert!(ordered, "word {n} is not strictly ordered relative to the previous");
             }
             if is_answer {
                 answers += 1;
