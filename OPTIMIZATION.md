@@ -1,191 +1,198 @@
 # Binary size optimization
 
-> How to build each profile on each platform: **[BUILD.md](BUILD.md)**. This file is the rationale
-> and the measured sizes; it refers to profiles by name and does not repeat the commands.
+The measured record of shrinking the release binary from **396,288 B** to **64,297 B** on Windows, and the reasoning behind each change.
 
-Reference (before): **396,288** bytes — the first crossterm+ratatui TUI, unoptimized.
+[README.md](README.md) presents the game; **[BUILD.md](BUILD.md) holds the build command for every profile on every platform**.
+This file never repeats a command — it names a profile and reports what it measured.
 
-The original goal was to go below ~300 KB, roughly the size of the repo's **initial commit**
-(`3b320c2`, *"wordle game"*) — a plain stdin/stdout wordle solver (`rand` its only dependency, no
-TUI, word lists as raw text), written as throwaway beginner Rust with no size effort at all. It
-stands for what an unoptimised, naive CLI happens to compile to; the point of the exercise was to
-bring the full interactive TUI below even that.
+**Contents** — [Where it stands](#where-it-stands) · [How sizes are measured](#how-sizes-are-measured) · [Changelog](#changelog) · [Rejected experiments](#rejected-experiments) · [Stuck costs](#stuck-costs) · [Panic handling](#panic-handling)
 
-Initial `.text` breakdown (cargo-bloat): std 72.5 KB, ratatui_core 30 KB, wordle_tui 13.9 KB,
-crossterm 10.3 KB, ratatui_widgets 8.5 KB, hashbrown 8.2 KB, kasuari 6.8 KB, parking_lot 3 KB,
-unicode_width 2.8 KB, unicode_segmentation 2.5 KB, parking_lot_core 2.2 KB.
-Embedded data: valid.bin 62,570 + answers.bin 11,695 = ~74 KB (raw 5-letter ASCII).
+The original target was ~300 KB: the size of this repo's initial commit (`3b320c2`), a plain stdin/stdout solver with no TUI, written with no size effort at all.
+It stood for what a naive CLI happens to compile to, and the point was to fit the full interactive TUI under it.
+That fell at change [#2](#changelog); the work continued from there.
 
-## History (stable, `cargo build --release`)
+## Where it stands
 
-| # | Change | Size | Delta |
-|---|--------|------|-------|
-| 0 | Baseline | 396,288 | — |
-| 1 | Words packed as 3-byte base-26 (instead of 5) | 366,592 | −29,696 |
-| 2 | **Dropped ratatui → pure crossterm rendering** (layout reimplemented, fidelity snapshot-verified) | 242,176 | −124,416 |
-| 3 | crossterm `default-features=false`, features `[windows, events]` | 241,664 | −512 |
-| 4 | Data as LEB128 delta (gaps), streamed at runtime (instead of 3 fixed bytes) | 219,136 | −22,528 |
-| 5 | render: raw bytes instead of String/from_utf8_lossy | 217,600 | −1,536 |
-| 6 | main no longer returns io::Result (no Termination formatting) | 215,552 | −2,048 |
-| 7 | Streaming varint lookup (drops OnceLock/Vec/binary_search) | 214,528 | −1,024 |
-| 8 | Data as a single arithmetic-coded union (see `codec.rs`); source split into `build/` modules; idiomatic pass | 214,016 | −512 |
+| Profile | Windows | Linux (glibc) | Linux (musl) |
+|---------|--------:|--------------:|-------------:|
+| Baseline — first crossterm+ratatui TUI | 396,288 | — | — |
+| Stable — no prerequisites, cross-platform | 214,016 (−46.0%) | 418,184 | 505,872 |
+| `build-std` — nightly, std without `backtrace`; terminal still restored on panic | 117,248 (−70.4%) | 184,760 | 279,568 |
+| `immediate-abort` — nightly, most aggressive; terminal **not** restored on panic | **64,297** (−83.8%) | 85,703 | 148,784 |
 
-**~300 KB goal beaten at step 2** — mostly by removing ratatui (which dragged in kasuari,
-hashbrown, lru, compact_str, unicode-*, parking_lot, …) and rendering directly through
-crossterm. The ratatui cassowary layout algorithm was reimplemented by hand; its exact
-integer rounding is reproduced by the unified spacer model
-`spacer[i] = round((i+1)·E/g) − round(i·E/g)`.
+Caveats on that table, all of them about *when* a number was taken:
 
-### Visual fidelity (historical)
+- The **stable** and **build-std** rows are on-disk sizes measured before the recent data-layer and renderer work; they were not re-measured.
+  The **immediate-abort** Windows and Linux-glibc figures are un-padded section totals from the current source (see below for why the two metrics differ); the musl figure is older.
+- The Linux figure predates changes [#19–#21](#changelog), which were measured on Windows only.
+- Windows and Linux numbers are **not** comparable to each other: different linker, CRT and section layout, and glibc offloads libc to the system while the Windows `.exe` and musl do not.
+  To compare platforms, re-measure both under the same lever.
+  Linux currently runs ~18 KB heavier than Windows, almost all of it the `.eh_frame` unwind tables (see [Stuck costs](#stuck-costs)).
 
-The crossterm renderer was validated byte-for-byte against reference snapshots of the original
-ratatui output (`TestBackend`) across 15 scenarios — glyphs and colors. That ratatui oracle and
-its snapshots have since been removed from the tree (commit *"Remove ratatui & snapshots"*); the
-note is kept here as a record of how the rewrite's fidelity was established.
+The embedded corpus accounts for 14,283 B — 22% of the current Windows binary.
 
-### Data layer
+## How sizes are measured
 
-The data went through several encodings (3-byte base-26 → LEB128 gaps → streaming varint) and is
-now a single **arithmetic-coded union** of both word lists (`src/codec.rs`, built by
-`build/`): 14,853 words in `corpus.bin` at **~13.9 KB** (~0.96 B/word), searched by walking the
-stream. The residual colour partition (answer vs. valid-only) is ~1.0 KB after conditioning it on
-the last letter (see "Conditioned colour bit"); what is left there is human-curation entropy no
-letter model predicts. The encoder (build) and decoder (game) share `codec.rs`'s range coder and model
-*math* so they agree bit-for-bit — a round-trip test guards this — but no longer its *storage*:
-the encoder holds its model counts in `Vec`s (it searches `order`/`inc`), the decoder in fixed
-arrays sized by the baked-in constants (see "Asymmetric decoder" below).
+Build with a profile from [BUILD.md](BUILD.md), then measure with `tools/stats.rs`.
+The tool only *measures* — it never builds, so build first:
 
-## Measuring (`tools/stats.rs`, `cargo run --example stats`)
-
-The shipped `.exe` is a PE file whose sections are padded to 512 B, so a real saving of a few
-dozen bytes often does **not** change the file size — it hides in the padding. Compare the sum of
-each section's `VirtualSize` (un-padded), not the file size.
-
-`cargo run --example stats` prints the compression report **and**, once the game is built, the
-binary's on-disk size plus every PE section's `VirtualSize` and their total. It only *measures*
-(it does not build), so build first, then run it:
-
-```
-cargo build --release                          # or any BUILD.md profile
-cargo run --example stats                       # measures the freshest release binary it finds
-cargo run --example stats -- <path-to-binary>   # measure a specific binary
+```bash
+cargo run --example stats
 ```
 
-Without an argument it looks for the release outputs BUILD.md documents (the MSVC triple first,
-then plain `target/release`); the argument overrides that.
+With no argument it measures the freshest of the release outputs BUILD.md documents (the target triple first, then plain `target/release`).
+Pass a path to pin the binary — necessary when several profiles coexist in `target/`:
 
-- **file on disk** = what you distribute (512 B-aligned).
-- **total VirtualSize** = real code + data, no padding. Compare *this* between changes.
-
-(The build script runs before linking and can't see the final binary, so the report is a separate
-post-build tool, not a `cargo:warning`.)
-
-The tool prints the section breakdown on both platforms: a PE parser (`#[cfg(windows)]`) and an ELF
-parser (`#[cfg(target_os = "linux")]`) whose per-section sizes and total match binutils `size -A`
-exactly (verified). Elsewhere it prints the on-disk size only. For an independent cross-check or a
-symbol-level breakdown on Linux:
-
-```
-size -A target/x86_64-unknown-linux-gnu/release/wordle_tui   # per-section, plus a Total
-bloaty  target/x86_64-unknown-linux-gnu/release/wordle_tui   # symbol-level attribution
+```bash
+cargo run --example stats -- target/x86_64-pc-windows-msvc/release/wordle_tui.exe
 ```
 
-The on-disk file size (`wc -c` / `ls -l`) is the distributable; unlike PE's 512 B section padding,
-ELF pads only to page alignment, so small savings still often hide in padding — compare the section
-`Total`, not the file size.
+It prints two reports: the **compression report** (word counts, packed size, B/word, and the model constants the build chose) and the **binary report** — the on-disk size plus every section's un-padded size and their total.
+Sections are parsed directly: PE `VirtualSize` on Windows, ELF `sh_size` on Linux, where the per-section figures and the total match binutils `size -A` exactly.
+On other platforms only the on-disk size is available.
 
-## build-std levers (nightly, `.cargo/config.toml`)
+> **Compare the section total, not the file on disk.**
+> PE pads sections to 512 B and ELF to page alignment, so a genuine saving of a few dozen bytes usually shows as 0 on disk — and occasionally as a −512 cliff that credits one change with the padding several changes filled.
+> The file on disk is what you ship; the section total is what you compare.
+>
+> This is why the two halves of the [changelog](#changelog) use different metrics: changes #1–#8 predate the tool and are on-disk `.exe` bytes (each one happens to be a multiple of 512), while #12 onward are section totals.
 
-Recompiling std from source with our profile (opt-level=z, LTO). NOT source changes; the game is
-identical; the nightly toolchain needs `rust-src`. The `[unstable]` table is ignored by stable
-cargo, so the stable build is untouched.
+The build script runs before linking and cannot see the final binary, which is why this is a post-build tool rather than a `cargo:warning`.
 
-Three profiles, by increasing aggressiveness. **Build commands for every platform live in
-[BUILD.md](BUILD.md)** — this file only names the profile and its effect:
+**Full validation run.**
+`tools/validate.sh` does everything in one invocation — tests, the Windows build and its size, the Linux build and size through WSL, and `cargo bloat` — on the shipping profile (immediate-abort + vendored crossterm).
+Use Git Bash on Windows:
 
-- **Stable (default)** — 100% preserved, no prerequisites, cross-platform.
-- **build-std, no `backtrace`** — std recompiled without its backtrace machinery; the panic hook
-  still restores the terminal. The recommended no-compromise build.
-- **immediate-abort** — every panic lowers to a bare abort; the terminal is **not** restored on a
-  bug-panic (edge case — see the panic audit above).
+```bash
+bash tools/validate.sh
+```
 
-Windows `.exe`:
+```bash
+bash tools/validate.sh --quick
+```
 
-| Profile | `.exe` | Behavior |
-|---------|-------:|----------|
-| Stable (default) | **214,016** | 100% preserved, no prerequisites |
-| build-std, no `backtrace` | **117,248** | terminal still restored on panic |
-| immediate-abort | **87,040** | panic → bare abort: terminal **not** restored (edge case) |
+(`--quick` = tests + Windows size only; `--no-linux` and `--no-bloat` are also accepted.)
+The `--config` patch build rewrites `Cargo.lock`; the script restores it on exit.
 
-`build-std` requires an explicit `--target`; the config intentionally does **not** pin one in
-`[build]`, so plain `cargo build` stays host-native and the project builds on any platform. The
-MSVC linker flags are keyed under `[target.x86_64-pc-windows-msvc]` and are simply inert elsewhere.
+**Independent cross-checks on Linux:**
 
-### On Linux
+```bash
+size -A target/x86_64-unknown-linux-gnu/release/wordle_tui
+```
 
-The same three profiles build on Linux (link optimizations under
-`[target.x86_64-unknown-linux-gnu]` in `.cargo/config.toml`). ICF (identical-code folding) is
-folded into each profile's build command rather than being a profile of its own.
+```bash
+bloaty target/x86_64-unknown-linux-gnu/release/wordle_tui
+```
 
-**ELF vs PE flag mapping.** `/DEBUG:NONE` → `-Wl,--build-id=none` (drops `.note.gnu.build-id`, in
-the `[target]` block; measured **−112 B** vs. the linker's default build-id). `/OPT:ICF` has **no
-default-linker equivalent** — GNU `bfd` does no identical-code folding, so ICF is done by `lld`:
-the nightly profiles use the bundled `rust-lld` (`-Clinker-features=+lld`, no install), the stable
-profile the system `lld` (`-fuse-ld=lld`). An env `RUSTFLAGS` overrides the `[target]` block rather
-than merging, so `--build-id=none` is repeated in every command (same gotcha as Windows). ICF's
-yield is small (~1–3 KB), matching `/OPT:ICF` on Windows.
+**`cargo bloat` is a hint generator, never ground truth.**
+Two failure modes, both observed here: identical-code folding (`/OPT:ICF`, `--icf=all`) makes it attribute a folded body to an arbitrary, often-dead symbol name — that is how `supports_ansi` and its `env::var` kept appearing in reports of a binary that does not contain them; and the `--config` crossterm patch is not reliably applied under `cargo bloat` (watch for *"patch … was not used in the crate graph"*), so it frequently measures upstream crossterm instead.
+Confirm any lead by string-probing the binary and by a measured rebuild.
 
-### Measured Linux sizes (WSL Ubuntu, rustc 1.97, on-disk bytes; smallest per profile)
+## Changelog
 
-**glibc — dynamically linked** (the on-disk size *excludes* the system libc, loaded at runtime):
+Every measured change, oldest first.
+Each row is explained in the section of the same number below.
 
-| Profile | Size | Δ baseline |
-|---------|-----:|-----------:|
-| Stable | 418,184 | — |
-| build-std, no `backtrace` | 184,760 | −55.8% |
-| immediate-abort | 125,896 | −69.9% |
+**Reading the delta columns:** `−1,234` / `+24` — measured on that platform.
+`0` — measured, no change.
+`—` — not measured on that platform.
+`≈` — the source measurement was taken at KB resolution.
 
-**musl — statically linked** (self-contained, *embeds* libc + unwinder; zero runtime deps):
+| # | Change | Δ Windows | Δ Linux | Windows after |
+|---|--------|----------:|--------:|--------------:|
+| | **A — Data & rendering rewrite** *(stable profile, on-disk `.exe`; from 396,288)* | | | |
+| 1 | Base-26 word packing | −29,696 | — | 366,592 |
+| 2 | ratatui dropped, direct crossterm rendering | −124,416 | — | 242,176 |
+| 3 | crossterm feature floor | −512 | — | 241,664 |
+| 4 | LEB128 gap-delta corpus | −22,528 | — | 219,136 |
+| 5 | Byte-level render output | −1,536 | — | 217,600 |
+| 6 | `main` no longer returns `io::Result` | −2,048 | — | 215,552 |
+| 7 | Streaming varint lookup | −1,024 | — | 214,528 |
+| 8 | Arithmetic-coded corpus | −512 | — | 214,016 |
+| | **B — Build & link levers** *(profile transitions, not source changes; not additive with A or C)* | | | |
+| 9 | `/DEBUG:NONE` (PE) / `--build-id=none` (ELF) | −56 | −112 | — |
+| 10 | `build-std` without std's `backtrace` | ≈ −39 KB | ≈ −233 KB | — |
+| 11 | `-Cpanic=immediate-abort` | −30,720 | −58,864 | — |
+| | **C — Source & data changes since** *(immediate-abort profile, section totals; Windows from 77,838)* | | | |
+| 12 | Raw ANSI output | −5,777 | +15 | 72,061 |
+| 13 | Vendored crossterm: ioctl-only `size()` | 0 | −28,705 | 72,061 |
+| 14 | Decoder without per-word heap `Vec` | −216 | — | 71,845 |
+| 15 | Vendored crossterm: single-threaded, `parking_lot` dropped | −5,792 | −4,210 | 66,053 |
+| 16 | `ui::render`: home once + CNL | −96 | +8 | 65,957 |
+| 17 | `codec::Model` without the parallel `total` Vec | −180 | −12 | 65,777 |
+| 18 | Asymmetric decoder: fixed-array model storage | −608 | +24 | 65,169 |
+| 19 | Position-conditioned context | −696 | — | 64,473 |
+| 20 | Searched word ordering | 0 | — | 64,473 |
+| 21 | Conditioned colour bit | −176 | — | 64,297 |
+| | **D — Measured standalone** *(not points on either chain)* | | | |
+| 22 | `ui::center` via `saturating_sub`/`div_ceil` | −32 | — | — |
+| 23 | Panic hook: `exit(101)` instead of returning | 0 *(+80 `.text`)* | — | — |
 
-| Profile | Size | Δ baseline |
-|---------|-----:|-----------:|
-| Stable | 505,872 | — |
-| build-std, no `backtrace` | 279,568 | −44.7% |
-| immediate-abort | 148,784 | −70.6% |
+### 1 — Base-26 word packing
 
-Note musl static is **larger on disk than the glibc builds**, not smaller: it bakes the whole libc
-into the file. The glibc numbers look smaller only because they offload libc to the system at load
-time — the musl binary is the honest "everything included" size and runs on any Linux with no deps.
+Both lists shipped as raw 5-byte ASCII (62,570 B of valid words + 11,695 B of answers ≈ 74 KB).
+A five-letter word is a base-26 number below 26⁵ ≈ 1.19 M, so it fits in 3 bytes instead of 5.
 
-**build-std + musl gotcha.** build-std rebuilds the Rust sysroot from source but does **not** build
-the musl C runtime; the CRT objects (`rcrt1.o`, `libunwind.a`, …) come from the *prebuilt* target's
-`lib/rustlib/x86_64-unknown-linux-musl/lib/self-contained/`. So that target must be installed on the
-**nightly** toolchain (not just stable), else linking fails with `cannot find rcrt1.o` / `-lunwind`;
-`musl-tools` is *not* what fixes it. BUILD.md's musl section spells out the `rustup target add` step.
+### 2 — ratatui dropped, direct crossterm rendering
 
-**Cross-platform caveat.** These are **not** directly comparable to the Windows `.exe` numbers in
-this file — different linker, CRT, and section layout (and glibc offloads libc while the Windows
-`.exe` and musl do not). To compare platforms, re-measure a Windows and a Linux build under the
-same lever rather than reading across the two tables.
+The single largest change, and the one that beat the ~300 KB goal.
+ratatui dragged in kasuari, hashbrown, lru, compact_str, the unicode-* crates and parking_lot; rendering now goes straight through crossterm.
+Its cassowary layout was reimplemented by hand, and the exact integer rounding is reproduced by the unified spacer model `spacer[i] = round((i+1)·E/g) − round(i·E/g)`.
 
-The immediate-abort command also passes `--cfg immediate_abort`, which gates the panic hook out of
-`main.rs`: that build lowers every panic to a bare abort that bypasses the hook, so registering one
-is dead weight (declared via `cargo::rustc-check-cfg` in `build/main.rs` to keep the lint quiet).
+Fidelity was established byte-for-byte — glyphs and colours — against reference snapshots of the original ratatui output (`TestBackend`) across 15 scenarios.
+That oracle and its snapshots were removed from the tree afterwards (commit *"Remove ratatui & snapshots"*); this note is the record.
 
-### The big lever: build std without the `backtrace` feature
+### 3 — crossterm feature floor
 
-**Saved ~30 KB of `.text` / ~39 KB of `.exe` (156.7 KB → 117.8 KB).** `cargo bloat` showed the
-largest non-game mass was the panic **backtrace/demangle** machinery: `rustc_demangle` (~8 KB),
-`std::sys::backtrace` (~6 KB), `backtrace_rs::symbolize` + the `dbghelp` walk, plus satellites
-(`getenv` for `RUST_BACKTRACE`, `path::components`, `slice_error_fail`) — **57 symbols**. It is
-all dead weight: nothing in the game prints a backtrace.
+`default-features = false, features = ["windows", "events"]`, dropping `bracketed-paste` and `derive-more`.
+This is the floor, not a step towards one — see the dependency audit under [Stuck costs](#stuck-costs).
 
-It cannot be dropped from source: std's panic runtime keeps `match HOOK { Hook::Default =>
-default_hook(..) }` compiled, and LTO cannot prove the hook is never `Default`, so `default_hook`
-(and everything it calls) stays reachable no matter what custom hook we install. Confirmed:
-replacing the hook left all 57 symbols linked (only ~432 B of hook plumbing went).
+### 4 — LEB128 gap-delta corpus
 
-The lever is at the std level:
+The words are sorted, so consecutive base-26 codes differ by small gaps.
+Storing LEB128 gaps instead of 3 fixed bytes per word, and decoding them by streaming at runtime, roughly halves the data again.
+
+### 5 — Byte-level render output
+
+The render path builds raw byte buffers rather than `String` + `from_utf8_lossy`, dropping the UTF-8 validation and conversion machinery.
+
+### 6 — `main` no longer returns `io::Result`
+
+Returning a `Result` from `main` links the `Termination` implementation, which formats the error via `Debug`.
+`main` now handles every `Result` itself.
+
+### 7 — Streaming varint lookup
+
+Lookups walk the compressed stream directly instead of decoding it once into a `Vec` behind a `OnceLock` and running `binary_search` — that removed the `OnceLock`, the allocation and the search.
+
+### 8 — Arithmetic-coded corpus
+
+Both lists merged into one adaptive-model arithmetic-coded stream (`src/codec.rs`, encoder in `build/`), replacing the varint scheme; the source was split into `build/` modules in the same pass.
+Small on the binary, but it is the foundation the data work in [#19](#19--position-conditioned-context) and [#21](#21--conditioned-colour-bit) builds on.
+
+The encoder (build) and decoder (game) share `codec.rs`'s range coder and model *math*, so they agree bit-for-bit — the `corpus_round_trips` test guards this.
+They no longer share its *storage*; see [#18](#18--asymmetric-decoder-fixed-array-model-storage).
+
+### 9 — `/DEBUG:NONE` (PE) / `--build-id=none` (ELF)
+
+`strip = true` removes symbols, but the MSVC linker still emits an `IMAGE_DEBUG_DIRECTORY` — a CodeView entry pointing at `wordle_tui.pdb` plus a REPRO entry, ~84 B — and leaks the `.pdb` path as a string in `.rdata`.
+`-Clink-arg=/DEBUG:NONE` leaves only the 28 B REPRO stub.
+On ELF the equivalent is `-Wl,--build-id=none`, which drops `.note.gnu.build-id` (−112 B versus the linker default).
+Both live in `[target.*] rustflags` and apply to every profile.
+
+The Windows figure is −56 B of `VirtualSize`; on disk the same change once showed −512 B because it crossed a section-alignment boundary — exactly the padding effect described in [How sizes are measured](#how-sizes-are-measured).
+
+**Gotcha:** setting `RUSTFLAGS` in the environment *overrides* the config's `[target.*] rustflags` rather than merging, so these flags have to be repeated on any command line that sets `RUSTFLAGS`.
+BUILD.md's commands already do.
+
+### 10 — `build-std` without std's `backtrace`
+
+`cargo bloat` showed the largest non-game mass was the panic **backtrace/demangle** machinery: `rustc_demangle` (~8 KB), `std::sys::backtrace` (~6 KB), `backtrace_rs::symbolize` and the `dbghelp` walk, plus satellites (`getenv` for `RUST_BACKTRACE`, `path::components`, `slice_error_fail`) — **57 symbols**, all dead weight, since nothing in the game prints a backtrace.
+
+It cannot be dropped from source.
+std's panic runtime keeps `match HOOK { Hook::Default => default_hook(..) }` compiled, and LTO cannot prove the hook is never `Default`, so `default_hook` and everything it calls stay reachable whatever custom hook we install — confirmed by measurement: replacing the hook left all 57 symbols linked and freed only ~432 B of plumbing.
+
+The lever is at the std level, in `.cargo/config.toml` (the `[unstable]` table is ignored by stable cargo, so the stable build is untouched):
 
 ```toml
 [unstable]
@@ -193,384 +200,220 @@ build-std = ["std", "panic_abort"]
 build-std-features = []   # none of std's defaults -> no `backtrace`
 ```
 
-Result: 57 → 4 backtrace symbols (~45 B of inert stubs). Crucially still a **safe** build: the
-panic hook runs and restores the terminal; a bug-panic just aborts without a symbolized trace.
+Result: 57 → 4 backtrace symbols (~45 B of inert stubs), `.exe` 156.7 KB → 117.8 KB.
+Crucially it stays a **safe** build — the panic hook still runs and restores the terminal; a bug-panic just aborts without a symbolized trace.
+This is the recommended no-compromise profile.
 
-### The panic hook
+The Linux gain is far larger because std's backtrace there carries its own DWARF stack (gimli, addr2line, object, miniz_oxide) instead of calling into a system library.
 
-`main` installs a minimal hook that restores the terminal and then `std::process::exit(101)`:
+`build-std` requires an explicit `--target`; the config deliberately pins none in `[build]`, so a plain `cargo build` stays host-native and the project still builds anywhere.
+Note that build-std rebuilds the Rust sysroot but **not** the musl C runtime: the CRT objects come from the *prebuilt* target, which must therefore be installed on the **nightly** toolchain as well, or linking fails with `cannot find rcrt1.o` / `-lunwind` (`musl-tools` is not what fixes it).
+BUILD.md spells out the `rustup target add` step.
 
-1. **Not delegating to the default hook.** Printing the panic message would pull `io::stderr` +
-   `writeln!` machinery the default path doesn't share; every message-printing variant measured
-   *larger* (delegating to `default_hook`: +416 B; `writeln!("{info}")`: more). On a bug-panic the
-   restored screen is what matters, not the text.
-2. **`exit()` instead of returning.** If the hook returns, `panic = "abort"` calls `abort()`,
-   which on Windows hands off to Windows Error Reporting — a **~1 s stall** before the shell
-   prompt returns. `exit(101)` terminates first and skips WER. Costs +80 B `.text`, 0 in the
-   `.exe`. 101 is Rust's conventional panic exit code.
+### 11 — `-Cpanic=immediate-abort`
 
-### Where panics come from (and why removing them doesn't help)
+Every panic — bounds check, division, slice, `unreachable!` — compiles to a bare abort, so every call site loses its location struct, argument setup and message string program-wide, std included.
+That is why it is worth ~30 KB rather than the ~3 KB of message formatting alone.
 
-- **Explicit (ours):** one in the runtime path — `unreachable!(..)` in `pick_target`. No
-  `unwrap`/`expect` at runtime (`main` handles every `Result` with `if let Ok`).
-- **Implicit (~99 %):** bounds checks on every index, the range-coder divisions (`range /= tot`,
-  `div_round`), slice ranges.
+The catch: immediate-abort bypasses the hook mechanism, so `restore_terminal` never runs and a bug-panic leaves the terminal dirty.
+The command also passes `--cfg immediate_abort`, which gates the then-dead hook out of `main.rs` (declared via `cargo::rustc-check-cfg` in `build/main.rs`).
+See [Panic handling](#panic-handling) for why that dirty-terminal case is theoretical.
 
-Removing our explicit panics saves almost nothing: the implicit bounds checks keep
-`panic_bounds_check` → the panic runtime → the message formatting (`panic_with_hook` + the still-
-reachable `default_hook` + `core::fmt`) all linked.
+ICF (identical-code folding) is folded into each profile's build command rather than being a profile of its own; it yields ~1–3 KB on both platforms.
+On ELF it needs `lld` — `/OPT:ICF` has no default-linker equivalent, as GNU `bfd` does no folding at all — which is why BUILD.md's nightly Linux commands use the bundled `rust-lld` and the stable one the system `lld`.
 
-The lever that *does* work is `-Cpanic=immediate-abort`: it makes every panic — bounds check,
-divide, slice, `unreachable!` — compile to a bare abort, so every call site loses its location
-struct / argument setup / message string program-wide (in std too, not just our code). Measured:
-**117,760 → 87,040 (−30 KB)**, far more than the ~3 KB of message formatting alone. The catch is
-that immediate-abort bypasses the hook mechanism, so `restore_terminal` never runs and the
-terminal is left dirty on a bug-panic. That trade — 30 KB vs. a clean screen after a crash — is
-the user's call; the default here keeps the safe build.
+### 12 — Raw ANSI output
 
-### immediate-abort safety (manual panic audit)
+`ui::render` and the terminal setup in `main.rs` no longer go through crossterm's `SetForegroundColor` / `MoveTo` / `EnterAlternateScreen` / `SetTitle` / `Clear` commands; they write the escape bytes directly.
+Colours are precomputed `&'static [u8]` SGR constants stored in each `Cell`; alt-screen, title, cursor-hide and clear are literal CSI/OSC byte strings, byte-identical to what crossterm emits.
+On Windows that reclaims two things:
 
-The catch above — a dirty terminal on panic — only bites if a panic is actually *reachable*.
-It is not. Every runtime panic site was traced by hand (release profile has
-`overflow-checks = false`, so integer overflow/underflow **wraps** and is not itself a panic;
-the only panic families left are out-of-bounds index/slice, divide-by-zero, `copy_from_slice`
-length mismatch, and explicit panics). The audit's verdict: **no panic is reachable while the
-embedded `union.bin` is intact**, so under immediate-abort the dirty-terminal case is purely
-theoretical (it would require a corrupted binary, at which point terminal state is moot).
+- the **integer `fmt` machinery** the colour and cursor commands pulled in via `write!` (`Colored::fmt`, `pad_integral`, `fmt::write`) — `render` was the only integer-formatting site;
+- the **WinAPI fallback** of every terminal and cursor command (`SetConsoleTitleW` with its UTF-16 `EncodeUtf16` path, alt-screen/cursor/clear through the console API).
+  Each command compiled *both* an ANSI and a WinAPI path, selected at runtime by `supports_ansi()`, so both were linked.
 
-**Locally guaranteed** (no external assumption):
+Mouse capture **stays** on crossterm: on Windows `EnableMouseCapture` is WinAPI-only, because the console event source reads mouse input from the input buffer rather than from ANSI reports, so the `?1000h…` sequences would not work.
+Since we no longer call `supports_ansi()` (which enabled VT as a side effect), `init_terminal` sets `ENABLE_VIRTUAL_TERMINAL_PROCESSING` itself through `crossterm_winapi` — already a transitive dependency of crossterm on Windows, so zero graph cost.
 
-- **`Grid` rendering (`ui.rs`)** — every write/read goes through `set`/`text`/`hit_rect`/
-  `hit_test`, all guarded by `px < self.w && py < self.h`. Off-screen access is a silent no-op;
-  the renderer cannot panic regardless of terminal size (even a `w == 0` underflow wraps to a
-  huge index that the bound rejects).
-- **`app.rs` indexing** — `history[input_idx]` is safe because `input_idx ∈ 0..=5` while
-  `Playing` (`submit` flips to `Lost` as soon as `input_idx >= 6`) and every draft/typing path
-  runs only in `Playing`; `keyboard_letter_states` slices `history[..input_idx]` with
-  `input_idx <= 6 = history.len()`. `type_letter`/`backspace` are guarded on `input_len`.
-  `copy_from_slice` copies two `[u8; 5]`. The lost-message builds its string by pushing the
-  target's uppercased bytes as `char`s (all ASCII, infallible — no `str::from_utf8`).
-- **`ui.rs` layout math** — the sole runtime division (`div_round`) is only called from `gaps`
-  with divisor `d = n - 1 >= 1` (guarded `n <= 1`); `gaps`/`stack_sizes` run with
-  `n <= SECTION_COUNT = 4 < MAX_GUESSES`, so their fixed-size arrays never overflow;
-  `col_budget` steps `cell` down from an odd `full` and stops at 1; `saturating_sub`/`div_ceil`
-  guard every spot that could underflow.
-- **`game::check`** — bounds `0..WORD_LEN` over `[u8; 5]` arrays passed by `submit`.
-- **Range-coder divisions** (`decode_freq`: `range /= tot`, then `code / range`) — `range >= TOP
-  = 2^24` is held by the renorm loops, and every `tot <= WORD_COUNT = 14853 < 2^24`, so
-  `range / tot >= 1`: `code / range` can never divide by zero.
+Linux is byte-neutral (+15 B): crossterm already emits ANSI there and `supports_ansi` is Windows-only, so there was no second path to reclaim.
 
-**Load-bearing invariant** — two sites are *not* locally guarded; both reduce to the same
-assumption, that `union.bin` is exactly the encoder's output (fixed at build time, checked by
-the `union_round_trips` test). They carry a source comment pointing here:
+### 13 — Vendored crossterm: ioctl-only `size()`
 
-1. **`unreachable!` in `pick_target` (`game.rs`)** — hit only if the stream holds fewer than
-   `ANSWER_COUNT` colour-A words. The encoder emits exactly `ANSWER_COUNT`.
-2. **Divide-by-zero in `decode_freq` via `tot == 0`** — the only zero total is
-   `char_tot(ctx, lo)` with `lo == 26` (empty sum), which needs a word whose first differing
-   character exceeds `'z'`. The sort proves `w[p] > prev[p]` with `w[p] <= 25`, so
-   `prev[p] <= 24` ⟹ `lo <= 25` ⟹ at least the `s = 25` term ⟹ `char_tot >= 1`. The colour
-   decode feeds `decode_freq(f0 + f1)` with `f0, f1 >= 1` (add-one smoothing), so its total is
-   always `>= 2`; no divide-by-zero there regardless of the data.
+crossterm's `terminal::size()` falls back to spawning `tput` when the `TIOCGWINSZ` ioctl fails, and its Unix event source calls `size()` on every resize, so that fallback is always reachable.
+It anchored `std::process::Command`, a `BTreeMap<OsString, OsString>` environment copy, and their `Debug`/`fmt` subtree.
+A vendored crossterm with an ioctl-only `size()` drops all of it; `nm` confirms `tput_value`, `Command` and `BTreeMap` are gone.
+Windows is unaffected — its `size()` uses `GetConsoleScreenBufferInfo`.
 
-No runtime `assert!` was added to "lock" these: that would create panic sites and grow the
-binary — the opposite of the goal. The invariant is enforced where it belongs, at build time.
+The patch is **opt-in**, since a `[patch]` cannot be a cargo feature: it is injected with `--config .cargo/crossterm-patch.toml` so a plain `cargo build` stays on upstream.
+Only crossterm's lib target is built as a dependency, so the vendored copy is trimmed to `src/`, `Cargo.toml`, `LICENSE` and `README.md`.
+Full rationale, wiring and the `Cargo.lock` caveat: [vendor/crossterm/LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md).
 
-## Tried and rejected (don't redo these)
+### 14 — Decoder without per-word heap `Vec`
 
-- **`ORDER` as a const generic on `Model`.** −48 B `.text`, **0 B in the `.exe`**. The compiler
-  already const-propagates `ORDER` (single call site, value baked into `constants.rs`), so the
-  const generic recovers only the residue, which hides in padding. Not worth threading a generic
-  through `Model`/`decode_word`/`encode_*` + the build's search dispatch.
-- **Generating the decoder as source in the build.** Rejected: nothing in the decoder's *shape*
-  varies with the word data — only 3 numbers (`ORDER`/`INC`/`WORD_LEN`), already compile-time
-  constants. Codegen would buy at most what const generics buy (≈0) while sacrificing the single
-  shared `codec.rs` that makes encode/decode provably agree.
-- **`Model.pref_total`: drop the field, recompute `sum(pref)` on demand.** The invariant holds
-  (`pref_total == sum(pref)`, same as `total`/`counts` below), but `pref` is summed in *two* hot
-  spots (`pref_tot`, `pref_update`), so recomputing costs **+16 B** where dropping the parallel
-  `total` Vec *saved* 180. Kept the cached `pref_total` u32. (The Vec `total` was still worth
-  dropping — a whole `from_elem::<u32>` monomorphization; a cached u32 scalar is not.)
-- **`Model.counts`/`pref`: `Vec` → `Box<[T]>`.** `into_boxed_slice()` pulls in the shrink/realloc
-  path: **+156 B**. Kept `Vec`.
-- **`App::submit`: array-copy → `guess == &self.target`.** Cleaner, but **+48 B**. Kept the copy.
-- **`ui::gaps`: indexed loop → `iter_mut().take(d).enumerate()`** (clippy's suggestion). **+16 B**
-  (the `.take` iterator machinery). Kept the indexed loop under `#[allow(needless_range_loop)]`.
-- **Raw-handle stdout output (Windows): write to the stdout `HANDLE` via `File`/`WriteFile` to skip
-  std's console UTF-16 path (`write_valid_utf8_to_console` + `EncodeUtf16`).** Measured only
-  **−314 B** — the `File`/`WriteFile` path pulls back most of what the UTF-16 path freed. Not worth
-  the `unsafe` handle wrapping, a platform-split writer type, and output-path risk that can't be
-  verified without a real Windows console. Rejected.
+`decode_word` and `words::Corpus` allocated a `Vec` per decoded word; both now use fixed `[u8; WORD_LEN]` buffers.
+The corpus walk runs per lookup, so this sat on the hot path.
 
-## Idiomatic changes that were free or a win
+### 15 — Vendored crossterm: single-threaded, `parking_lot` dropped
 
-Most idiomatic cleanups compile identically (confirmed byte-neutral): `Ordering` import +
-`w.cmp(&target)`, `array::from_fn`, the named-constant colour palette in `ui.rs`, small renames.
-One was a genuine win — **`ui::center`: `(outer-inner+1)/2` → `saturating_sub(inner).div_ceil(2)`**,
-cleaner and **−32 B**. Lesson: idiomatic ≠ smaller; measure each change.
+`parking_lot` was long listed as an unreclaimable cost held by `crossterm::event`/`terminal`.
+It had exactly two live anchors, both global `Mutex`es in crossterm: `INTERNAL_EVENT_READER` (`event.rs`) and `TERMINAL_MODE_PRIOR_RAW_MODE` (`terminal/sys/unix.rs`, Linux only).
+The app is single-threaded — one event-loop thread, no threads spawned anywhere — so the vendored copy replaces both with unsynchronized `UnsafeCell`s, and `parking_lot` + `parking_lot_core` drop out entirely on both platforms.
+The two changes are not independent per platform: the event reader is what frees Windows, the raw-mode cell what frees Linux — see [LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md) changes 2 and 3.
 
-### `ui::render`: per-row `MoveTo(0, y)` → home once + CNL between rows (Windows −96 B)
+### 16 — `ui::render`: home once + CNL
 
-`render` positioned every row with an absolute `MoveTo(0, y)` — `CSI <row+1> ;1H` — which meant
-formatting `row+1` in base-10 on each row (a `buf[5]` divide-by-10 loop). Since rows are painted
-top-to-bottom and every row writes **exactly `width` printable ASCII glyphs** (SGR escapes don't
-move the cursor), the cursor's position after each row is deterministic: emit `CSI H` (home) once,
-then step down with `CSI E` (CNL — column 1 of the next line, what `crossterm::MoveToNextLine`
-emits) *between* rows only (never after the last, so it can't scroll the alt-screen at the bottom).
-That deletes the per-row decimal-formatting loop from `.text`. **Windows 66,053 → 65,957 (−96 B).**
+`render` positioned every row with an absolute `MoveTo(0, y)` — `CSI <row+1>;1H` — which meant formatting `row+1` in base-10 for each row (a `buf[5]` divide-by-ten loop).
+Rows are painted top-to-bottom and every row writes exactly `width` printable ASCII glyphs (SGR escapes do not move the cursor), so the cursor position after each row is deterministic: emit `CSI H` (home) once, then step down with `CSI E` (CNL, column 1 of the next line — what `crossterm::MoveToNextLine` emits) *between* rows only, never after the last, so it cannot scroll the alternate screen at the bottom.
+That deletes the per-row decimal-formatting loop from `.text`.
 
-**Linux +8 B** (85,683 → 85,691): the loop was already ICF-folded there, so removing it frees
-nothing, and the restructure crosses a `.text` function-alignment boundary. Kept anyway — the same
-call the raw-ANSI refactor made (Windows win, single-digit-byte Linux drift it labels
-"byte-neutral"). Fidelity is preserved: cursor moves only, rendered output identical.
+Linux gains nothing (+8 B): the loop was already ICF-folded there, and the restructure crosses a `.text` function-alignment boundary.
+Kept for the Windows win; rendered output is identical, only cursor moves changed.
 
-### `codec::Model`: delete the parallel `total` Vec (Windows −180 B, Linux −12 B)
+### 17 — `codec::Model` without the parallel `total` Vec
 
-The model kept `counts` (`[u16; 26]` per context) *and* a parallel `total: Vec<u32>` (one running
-total per context). But a context's total is **exactly the sum of its counts** — the invariant
-holds through every `update` (both `+= inc`) and every halving (`total` was recomputed from the
-halved counts, i.e. their sum). So it is never stored: `update` now sums the 26 counts to test the
-`LIMIT` trigger, and the whole `vec![0u32; n_ctx]` — a distinct `from_elem::<u32>` monomorphization
-plus the `Vec<u32>` drop path, compiled into the decoder since `Model::new` is on the corpus walk —
-is gone. The compressed stream is unchanged (`packed` stays 15,206 B; `corpus_round_trips` green);
-the extra summing fits the codec's standing "trade CPU for size" stance. **Windows 65,957 → 65,777
-(−180 B), Linux 85,691 → 85,679 (−12 B).**
+The model kept `counts` (`[u16; 26]` per context) *and* a parallel `total: Vec<u32>` of one running total per context.
+A context's total is exactly the sum of its counts — the invariant holds through every `update` (both `+= inc`) and every halving (`total` was recomputed from the halved counts) — so it is no longer stored: `update` sums the 26 counts to test the `LIMIT` trigger, and the whole `vec![0u32; n_ctx]` disappears, taking with it a distinct `from_elem::<u32>` monomorphization and the `Vec<u32>` drop path, both of which were compiled into the decoder because `Model::new` runs on the corpus walk.
+The compressed stream is unchanged; the extra summing fits the codec's standing "trade CPU for size" stance.
 
-`counts` stayed a `Vec` here because its length is `27^order` with `order` varying during the
-build's model search, so it can't be a fixed array in a *shared* struct (same wall as the
-const-generic `ORDER`); turning `pref` into a fixed inline array had the same problem (a
-`MAX_WORD_LEN` cap decoupled from the build-inferred `WORD_LEN`). Both were **parked pending a
-decision** — later resolved by splitting the decoder's storage from the encoder's (see "Asymmetric
-decoder"), which is what unlocks the fixed arrays on the decoder side.
+### 18 — Asymmetric decoder: fixed-array model storage
 
-### Position-conditioned context (Windows −696 B)
+`codec.rs` used to hold one `Model` struct used verbatim by both ends, which forced its storage to be `Vec`s: the **encoder** searches `order`/`inc`/`word_len` and genuinely needs runtime-sized tables, but the **decoder** only ever runs the single winning `ORDER`/`INC`/`WORD_LEN`, baked into `constants.rs`.
+The shared struct was the only thing forcing an allocation on it — the same wall behind the rejected const-generic `ORDER`, since sizing `[[u16; 26]; 27^ORDER]` in a *shared* type would need `generic_const_exprs`.
 
-The adaptive char model conditioned only on the previous `ORDER` characters — position in the word
-was **not** part of the context, so all five slots shared one set of statistics. But fixed-length
-words are strongly positional (the letters likely at slot 0 differ sharply from slot 4), so folding
-the position into the context index is a large, cheap win. It is exposed as a new searched knob,
-`use_pos` (`build/encode.rs`), baked into `constants.rs` as `USE_POS` alongside `ORDER`/`INC` — a
-zero-byte channel, since the decoder const-folds it (`codec::ctx` multiplies the position in only
-when `USE_POS`, `codec::n_ctx` sizes the table accordingly). The build searches `{order 1..3} ×
-{pos off/on} × {inc 1..32}` and picks the smallest.
+`codec.rs` now exposes the range coder **and the model math as storage-agnostic free functions** (taking a `&[u16; 26]` count row, a `&[u16]` prefix slice); each end owns a thin wrapper that delegates to them — the encoder's `Vec`-backed `Model` (`build/encode.rs`), the decoder's array-backed `DecodeModel` (`src/words.rs`).
+Single source of truth for the probabilities, so the two ends still agree bit-for-bit; only the container differs.
 
-Measured on this corpus the winner is **pos + order-1** (`27·5 = 135` contexts): **blob 15,206 →
-14,449 B (−757 B, 1.02 → 0.97 B/word)**. Order-2 and order-3 lose either way (the table outruns the
-data); position + order-1 beats plain order-1 decisively. Searching extra knobs on top (a separate
-`inc` for the prefix vs. char model, a tunable halving `LIMIT`) buys only ~35 B more and overfits
-the corpus — not worth two more constants, so left out. The decoder gains one `idx * WORD_LEN + i`
-in `ctx` (const-folded multiply-add) and a larger stack count table (135·26·2 = 7020 B, still cheap
-to zero per lookup; the `const` assert still guards against a scheme too big for the stack).
+That deletes both `vec![[0u16; 26]; …]` and `vec![0u16; …]` from the decoder — two `from_elem` monomorphizations, the `RawVec` allocation and the drop/dealloc glue, all on the corpus walk (Windows: `.text` −576, `.pdata` −24, `.rdata` −8).
+At `ORDER = 1` the `counts` array is 27·26·2 = 1404 B, cheap to zero on the stack per lookup; a `const` assertion refuses to compile if a future corpus pushed `ORDER` past 2 (≈1 MB, stack-busting — box it there instead).
 
-**Windows 65,169 → 64,473 (−696 B):** the −757 B of blob, less ~61 B of the position arithmetic in
-`ctx`. `corpus_round_trips` stays green — the decoder rebuilds the identical position-aware model.
+Linux gains nothing (+24 B): it keeps a full allocator anyway, since crossterm's Unix input stack allocates, so dropping two `Vec`s frees almost nothing and the restructure crosses an `lld` ICF/alignment boundary.
+Kept for the Windows win.
 
-### Conditioned colour bit (Windows −176 B)
+### 19 — Position-conditioned context
 
-The per-word colour bit (answer vs. valid-only) was coded by exact sampling-without-replacement:
-optimal *if the answer subset is structureless*, spending `log2 C(14853, 2339) ≈ 1166 B`. But it is
-not structureless — Wordle answers avoid plurals, so a word's **last letter** predicts its colour
-(words ending `-s`: 0.9 % answers vs. 21.9 % otherwise). Replacing SWOR with a small **adaptive
-binary model conditioned on one build-searched letter** (`USE_COLOR`/`COLOR_POS`, here the last
-letter) captures that: colour cost `1166 → ~1000 B`. The model is adaptive, so nothing is stored —
-the `[[u32; 2]; 26]` count table lives on the stack, not in the binary.
+The adaptive character model conditioned only on the previous `ORDER` characters; position in the word was not part of the context, so all five slots shared one set of statistics.
+Fixed-length words are strongly positional, so folding the position into the context index is a large, cheap win.
+It is a searched knob (`use_pos` in `build/encode.rs`, baked into `constants.rs` as `USE_POS` alongside `ORDER`/`INC`) and a zero-byte channel, since the decoder const-folds it: `codec::ctx` multiplies the position in only when `USE_POS`, and `codec::n_ctx` sizes the table accordingly.
+The build searches `{order 1..3} × {pos off/on} × {inc 1..32}` and keeps the smallest.
 
-Which letter is searched, not assumed: `best_model` tries the shared model and each position, and
-per-position measurement is unambiguous — only the last letter carries real signal (position 4:
-−167 B; positions 0–3: −10..−20 B each). Combining positions does **not** help: a product context
-over two letters over-sparsifies (`{first,last}` = 676 contexts, *worse* than last alone; all five
-= 26⁵ contexts seen once each ≈ 1 bit/word), and a naive-Bayes mix of per-letter models tops out at
-~−11 B over last-alone (a float ceiling) for far more decoder code — a net loss. So the best
-"combination among the five positions" is the single last letter.
+On this corpus the winner is **position + order-1** (27·5 = 135 contexts): blob 15,206 → 14,449 B (−757 B, 1.02 → 0.97 B/word).
+Order-2 and order-3 lose either way — the table outruns the data.
+The Windows total moves by −696 B: the −757 B of blob, less ~61 B of position arithmetic in `ctx`.
+The decoder also gains a larger stack count table (135·26·2 = 7020 B, still cheap to zero per lookup; the `const` assertion still guards against a scheme too big for the stack).
 
-**Windows 64,473 → 64,297 (−176 B):** −166 B of blob (14,449 → 14,283, 0.96 B/word) plus ~10 B
-because the adaptive decoder (`decode_color` + one stack table) is actually *smaller* code than
-SWOR's `remaining`/`remaining_answers` bookkeeping and its two `Corpus` fields. `corpus_round_trips`
-stays green (bit-exact colour model on both ends).
+Searching further knobs on top — a separate `inc` for the prefix and character models, a tunable halving `LIMIT` — buys only ~35 B more and overfits the corpus, so they were left out.
 
-### Searched word ordering (0 B this corpus; not code-neutral across schemes)
+### 20 — Searched word ordering
 
-The stored order was implicitly forward-lexicographic-ascending. That is not assumed any more: two
-booleans, `REVERSE_WORD` (store words reversed → share suffixes instead of prefixes) and `DESCENDING`
-(sort direction), are searched by the build across all four combinations and baked into
-`constants.rs`, exactly like `USE_POS`. The decoder honours them through const-folded branches: the
-first differing character is bounded `[floor+1, 26)` ascending / `[0, floor)` descending, and
-`is_valid`/`pick_target` reverse the key when `REVERSE_WORD`. The `corpus_round_trips` guarantee
-holds for every scheme (validated by an out-of-tree encode+decode round-trip of all four).
+The stored order used to be implicitly forward-lexicographic-ascending.
+It is now searched: two booleans, `REVERSE_WORD` (store words reversed, sharing suffixes instead of prefixes) and `DESCENDING`, are tried in all four combinations and baked into `constants.rs` like `USE_POS`.
+The decoder honours them through const-folded branches — the first differing character is bounded `[floor+1, 26)` ascending, `[0, floor)` descending, and `is_valid`/`pick_target` reverse the key when `REVERSE_WORD`.
 
-For this corpus forward-ascending still wins the blob (14,449 B; reversed-asc 14,483, fwd-desc
-14,503, rev-desc 14,562), so the baked constants are `false/false` and **the decoder compiles
-byte-identically to before — 64,473 B, a genuine 0-cost addition** (the non-chosen branches are DCE'd).
+Forward-ascending still wins on this corpus (blob 14,449 B; reversed-ascending 14,483, forward-descending 14,503, reversed-descending 14,562), so the baked constants are `false/false` and the decoder compiles byte-identically to before: a genuinely free addition, the unchosen branches being eliminated.
 
-**But the four schemes are *not* code-size-neutral**, measured by pinning each ordering (non-blob =
-total − blob): fwd-asc **50,024**, fwd-desc 50,066, rev-asc 50,006, rev-desc 50,167 — a 161 B spread.
-Reason: ascending's upper bound is the constant `26`, which `char_tot`/`char_find` fold away;
-descending's upper bound is `prev[p]` (runtime), so those loops keep a dynamic bound and compile
-larger (up to +143 B for rev-desc). Consequence worth remembering: the build minimises the *blob* as
-a proxy, but for the *ordering* dimension that proxy is blind to a decoder-code delta of ~140 B, so
-on a future word list a blob-only pick could be off by that much. Here it is moot (forward-ascending
-is smallest on both blob and code); if it ever mattered, `best_model` would need to add a per-scheme
-code penalty. Kept as-is: correct, data-driven, and free on the shipped binary.
+**The four schemes are not code-size-neutral, though**, measured by pinning each ordering (non-blob = total − blob): forward-asc **50,024**, forward-desc 50,066, reversed-asc 50,006, reversed-desc 50,167 — a 161 B spread.
+Ascending's upper bound is the constant `26`, which `char_tot`/`char_find` fold away, while descending's is `prev[p]`, a runtime value that keeps those loops dynamic.
+Worth remembering: the build minimises the *blob* as a proxy, and for this dimension the proxy is blind to ~140 B of decoder code, so on a future word list a blob-only pick could be off by that much.
+Here it is moot — forward-ascending is smallest on both — but `best_model` would need a per-scheme code penalty if it ever mattered.
 
-### Asymmetric decoder: fixed-array model storage (Windows −608 B, Linux +24 B)
+### 21 — Conditioned colour bit
 
-`codec.rs` used to hold one `Model` struct used verbatim by both ends. That forced its storage to
-be `Vec`s: the **encoder** searches `order`/`inc`/`word_len`, so it genuinely needs runtime-sized
-tables. But the **decoder** only ever runs the single winning `ORDER`/`INC`/`WORD_LEN`, baked into
-`constants.rs` as compile-time constants — it never needed a `Vec`. The shared struct was the only
-thing forcing one on it (the wall behind the two parked notes above and the rejected const-generic
-`ORDER`: sizing `[[u16; 26]; 27^ORDER]` in the *shared* type would need `generic_const_exprs`).
+The per-word colour bit (answer vs. valid-only) was coded by exact sampling without replacement: optimal *if the answer subset is structureless*, spending `log2 C(14853, 2339) ≈ 1166 B`.
+It is not structureless — Wordle answers avoid plurals, so a word's **last letter** predicts its colour (words ending in `-s`: 0.9% answers, versus 21.9% otherwise).
+Replacing SWOR with a small adaptive binary model conditioned on one build-searched letter (`USE_COLOR`/`COLOR_POS`) captures that: colour cost 1166 → ~1000 B.
+The model is adaptive, so nothing is stored — its `[[u32; 2]; 26]` count table lives on the stack, not in the binary.
 
-The fix keeps the guarantee that matters and drops the constraint that didn't. `codec.rs` now
-exposes the range coder **and the model math as storage-agnostic free functions** (they take a
-`&[u16; 26]` count row / `&[u16]` prefix slice); the two ends each own a thin storage wrapper that
-delegates to them — the encoder's `Vec`-backed `Model` (moved to `build/encode.rs`), the decoder's
-array-backed `DecodeModel` (`src/words.rs`): `counts: [[u16; 26]; 27^ORDER]`, `pref: [u16; WORD_LEN]`.
-Single source of truth for the probabilities, so encode/decode still agree bit-for-bit
-(`corpus_round_trips` green, `packed` unchanged at 15,206 B); only the container differs.
+Which letter is used is searched, not assumed: `best_model` tries the shared model and each position, and only the last letter carries real signal (position 4: −167 B; positions 0–3: −10 to −20 B each).
+Combining positions does not help — a product context over two letters over-sparsifies (`{first,last}` = 676 contexts, *worse* than last alone; all five = 26⁵ contexts seen once each, ≈1 bit/word) and a naive-Bayes mix tops out at ~11 B over last-alone for far more decoder code.
 
-That deletes both `vec![[0u16; 26]; …]` and `vec![0u16; …]` from the decoder — the two
-`from_elem` monomorphizations, the `RawVec` alloc, and the drop/dealloc glue, all of which sat on
-the corpus walk (`Corpus::new` runs per lookup). **Windows 65,777 → 65,169 (−608 B: `.text` −576,
-`.pdata` −24, `.rdata` −8).** At `ORDER = 1` the `counts` array is 27·26·2 = 1404 B, cheap to zero
-on the stack per lookup; a `const` assertion refuses to compile if a future corpus pushed `ORDER`
-past 2 (≈1 MB, stack-busting — box it there instead).
+Blob 14,449 → 14,283 B (0.96 B/word, −166 B); the remaining ~10 B come from the adaptive decoder (`decode_color` plus one stack table) being *smaller* code than SWOR's `remaining` / `remaining_answers` bookkeeping and its two `Corpus` fields.
+What is left in the colour partition is human-curation entropy no letter model predicts.
 
-**Linux +24 B (85,679 → 85,703).** No real code was added — the decoder is smaller there too — but
-Linux keeps a full allocator anyway (crossterm's Unix input stack allocates), so dropping the
-decoder's two `Vec`s frees almost nothing, and the restructure crosses an `lld` ICF/function-
-alignment boundary. Same call as the raw-ANSI and home-once/CNL refactors: a real Windows win for
-a few bytes of documented Linux alignment drift. Kept.
+### 22 — `ui::center` via `saturating_sub`/`div_ceil`
 
-### `/DEBUG:NONE`: drop the residual Debug Directory
+`(outer - inner + 1) / 2` → `outer.saturating_sub(inner).div_ceil(2)`: cleaner *and* smaller.
+It is the exception — most idiomatic cleanups measured byte-neutral (an `Ordering` import with `w.cmp(&target)`, `array::from_fn`, the named-constant colour palette in `ui.rs`, various renames), and several measured *larger*; see [Rejected experiments](#rejected-experiments).
+Idiomatic ≠ smaller: measure each one.
 
-`strip = true` removes symbols but the linker still emits an IMAGE_DEBUG_DIRECTORY (a CodeView
-entry pointing at `wordle_tui.pdb`, plus a REPRO entry) — ~84 B, and it leaks the `.pdb` path as
-a string in `.rdata`. `-Clink-arg=/DEBUG:NONE` (in `[target.*] rustflags`) drops all but the 28 B
-REPRO stub. Measured: build-std **117,760 → 117,248** on disk (−512 B, crossed a section-alignment
-boundary); immediate-abort −56 B VirtualSize (0 on disk, hides in padding). Applies to stable too.
+### 23 — Panic hook: `exit(101)` instead of returning
 
-**Gotcha:** setting `RUSTFLAGS` in the environment (the immediate-abort command) *overrides* the
-config's `[target.*] rustflags` — it does not merge. So `/OPT:ICF` and `/DEBUG:NONE` must be
-repeated in that command line or they are silently lost.
+If the hook returns, `panic = "abort"` calls `abort()`, which on Windows hands off to Windows Error Reporting — a ~1 s stall before the shell prompt returns.
+`std::process::exit(101)` terminates first and skips WER (101 is Rust's conventional panic exit code).
+It costs +80 B of `.text` and 0 in the `.exe`, and applies to the profiles that keep the hook at all.
+See [Panic handling](#panic-handling).
 
-### Dependency feature audit (crossterm & its deps) — nothing to gain
+## Rejected experiments
 
-Checked whether trimming crossterm or its transitive deps' cargo features could shed more:
+Measured, then reverted.
+Recorded so they are not retried.
 
-- **crossterm** is already at the floor: `default-features = false, features = ["windows",
-  "events"]`. That drops `bracketed-paste` and `derive-more` (→ no `derive_more`). `events` is
-  required for input; `windows` for raw-mode/console. crossterm has **no `no_std` support** (it is
-  std-only, via parking_lot/mio/etc.) — not an option.
-- **`events`** pulls `mio`/`signal-hook`/`signal-hook-mio` only under `cfg(unix)`; on Windows they
-  are not compiled (no such symbols in the binary — crossterm uses its WinAPI event source).
-- **`parking_lot` has `default = []`** — no default features to strip; the ~2.8 KB is its base
-  mutex/`Once` (used by crossterm's `INTERNAL_EVENT_READER: Mutex<…>`), irreducible by feature.
-  Every parking_lot feature (`deadlock_detection`, `hardware-lock-elision`, `send_guard`, …) only
-  *adds* code.
-- **Cargo unifies features (union) across the graph**, so from our `Cargo.toml` we can only *add*
-  a transitive dep's features, never remove one that crossterm's own edge requests. Tuning
-  crossterm's deps from here is therefore impossible; the only lever would be `[patch]`-ing
-  crossterm, which buys nothing given `parking_lot`'s empty defaults.
-
-## Raw ANSI output (dropped crossterm's `style`/`Command` layer)
-
-`ui::render` and `main.rs`'s terminal setup no longer go through crossterm's
-`SetForegroundColor`/`MoveTo`/`EnterAlternateScreen`/`SetTitle`/`Clear`/… commands; they write the
-escape bytes directly. Colors are precomputed `&'static [u8]` SGR constants stored in each `Cell`;
-alt-screen/title/cursor-hide/clear are literal CSI/OSC byte strings (byte-identical to what
-crossterm emits). What this reclaims on **Windows**:
-
-- the **integer `fmt` machinery** the color/cursor commands pulled in via `write!`
-  (`Colored::fmt`, `pad_integral`, `fmt::write`) — `render` was the only integer-formatting site;
-- the **WinAPI fallback** of every terminal/cursor command (`SetConsoleTitleW` + its UTF-16
-  `EncodeUtf16` path, alt-screen/cursor/clear via the console API): each command compiled *both* an
-  ANSI and a WinAPI path, picked at runtime by `supports_ansi()`, so both were linked. Deleting the
-  commands drops the WinAPI halves.
-
-Mouse capture **stays** on crossterm: on Windows `EnableMouseCapture` is WinAPI-only
-(`is_ansi_code_supported() == false`) because the console event source reads mouse from the input
-buffer, not from ANSI reports — the `?1000h…` sequences would not work. Since we no longer call
-`supports_ansi()` (which enabled VT as a side effect), `init_terminal` sets
-`ENABLE_VIRTUAL_TERMINAL_PROCESSING` itself via `crossterm_winapi` (`#[cfg(windows)]`, already a
-transitive dep of crossterm → **0 graph cost**).
-
-Measured Windows immediate-abort: **77,838 → 72,061 (−5,777 B)**. On **Linux** it is byte-neutral
-(+15 B): crossterm already emits ANSI there and `supports_ansi` is `#[cfg(windows)]`, so there was
-no WinAPI path to reclaim. What it did **not** reclaim is `supports_ansi`'s `env::var` + `Once` —
-see Stuck costs.
-
-## Vendored crossterm: ioctl-only `terminal::size()` (Linux −28,705 B)
-
-crossterm's `terminal::size()` spawns `tput` as a fallback; because the event source calls `size()`
-on every resize, that fallback is always reachable and anchors `std::process::Command` + a
-`BTreeMap<OsString, OsString>` env copy + their `Debug`/`fmt` subtree. A **vendored crossterm** with
-an ioctl-only `size()` drops it: **Linux 118,608 → 89,903, −28,705 B**; Windows unaffected. It is
-**opt-in** (a `[patch]` can't be a Cargo feature), injected via `--config .cargo/crossterm-patch.toml`
-so a plain `cargo build` stays on upstream. Full rationale, wiring, and the `Cargo.lock` caveat:
-**`vendor/crossterm/LOCAL_PATCH.md`**.
-
-Measured Linux: **118,608 → 89,903 (−28,705 B, −24 %)**; `nm` confirms `tput_value`/`Command`/
-`BTreeMap` are gone. Windows is unaffected (its `size()` uses `GetConsoleScreenBufferInfo`, no
-`tput`). Only crossterm's lib target is built as a dependency, so the vendored copy is trimmed to
-`src/` + `Cargo.toml` + `LICENSE` + `README.md`.
+| Experiment | Measured | Why it was dropped |
+|------------|---------:|--------------------|
+| `ORDER` as a const generic on `Model` | −48 B `.text`, **0** in the `.exe` | The compiler already const-propagates `ORDER` (single call site, value baked into `constants.rs`); the const generic recovers only the residue, which hides in padding. Not worth threading a generic through `Model`/`decode_word`/`encode_*` and the build's search dispatch. |
+| Generating the decoder as source in the build | not measured | Nothing in the decoder's *shape* varies with the word data — only `ORDER`/`INC`/`WORD_LEN`, already compile-time constants. Would buy at most what const generics buy (≈0) while sacrificing the single shared `codec.rs` that makes encode/decode provably agree. |
+| Drop `Model.pref_total`, recompute `sum(pref)` | **+16 B** | The invariant holds, but `pref` is summed in two hot spots (`pref_tot`, `pref_update`). The cached `u32` stays — unlike the parallel `total` `Vec` ([#17](#17--codecmodel-without-the-parallel-total-vec)), which was a whole monomorphization. |
+| `Model.counts`/`pref`: `Vec` → `Box<[T]>` | **+156 B** | `into_boxed_slice()` pulls in the shrink/realloc path. |
+| `App::submit`: array copy → `guess == &self.target` | **+48 B** | Cleaner, but the comparison costs more than the copy. |
+| `ui::gaps`: indexed loop → `iter_mut().take(d).enumerate()` | **+16 B** | Clippy's suggestion; the `.take` iterator machinery costs more. Kept under `#[allow(needless_range_loop)]`. |
+| Raw-handle stdout on Windows (write to the stdout `HANDLE` via `File`/`WriteFile` to skip std's console UTF-16 path) | −314 B | The `File`/`WriteFile` path pulls back most of what the UTF-16 path freed. Not worth the `unsafe` handle wrapping, a platform-split writer type, and output-path risk that cannot be verified without a real Windows console. |
 
 ## Stuck costs
 
-- ~~**`parking_lot` (~3.3 KB) held by `crossterm::event`/`terminal`, unreclaimable.**~~
-  **Reclaimed** (Windows −5,792 B, Linux −4,210 B). `parking_lot` had two live anchors, both global
-  `Mutex`es in the vendored crossterm: `INTERNAL_EVENT_READER` (`event.rs`) and
-  `TERMINAL_MODE_PRIOR_RAW_MODE` (`terminal/sys/unix.rs`, Linux only). The app is single-threaded, so
-  both were replaced with unsynchronized `UnsafeCell`s; `parking_lot` + `parking_lot_core` then drop
-  out entirely on both platforms. See `vendor/crossterm/LOCAL_PATCH.md` §2–3.
-- **The `supports_ansi` probe (`env::var` + `parking_lot::Once`) is NOT actually in the binary.**
-  cargo-bloat lists it, but it is dead: its call sites are DCE'd (the `TERM`/`NO_COLOR`/`COLORTERM`
-  strings are absent from the linked `.exe`, and neutralizing those functions changes the size by
-  0 B). This is a **cargo-bloat artifact** — with `/OPT:ICF` (identical-code folding) the tool
-  attributes a folded body to an arbitrary, often-dead symbol name. Treat its per-symbol output as a
-  hint, not ground truth; verify a candidate by string-probing the binary and by a measured rebuild.
-- On **stable**, the panic/backtrace machinery (~12 KB), io::error fmt (~3 KB) and env (~2 KB) are
-  unavoidably linked by the panic runtime — the `backtrace` lever above only exists on nightly.
-- **Linux `.eh_frame` + `.eh_frame_hdr` (~18.6 KB).** Unwind tables from the *prebuilt* std. Dead
-  under `panic=abort`/immediate-abort (nothing unwinds), but this profile links prebuilt std, so the
-  build flags cannot drop them. Reclaimable via build-std (`-Cforce-unwind-tables=no`) or a
-  post-link `objcopy --remove-section .eh_frame --remove-section .eh_frame_hdr` (measured Linux
-  **118,608 → 99,956, −18,652 B**; runtime-validate before relying on it — it leaves a dangling
-  `PT_GNU_EH_FRAME` program header).
-  (The `tput` spawn cluster, once the biggest Linux stuck cost at ~28.7 KB, is now **reclaimed** —
-  see "Vendored crossterm" above.)
-- Everything else in `.text` is either ours (`main`, `ui::build_grid`, `app::submit`,
-  `words::decode_word`) or genuinely-used std/crossterm.
+- **Stable profile: the panic runtime.**
+  Backtrace machinery (~12 KB), `io::error` formatting (~3 KB) and `env` (~2 KB) are linked unavoidably; the `backtrace` lever ([#10](#10--build-std-without-stds-backtrace)) exists only on nightly.
+- **Linux `.eh_frame` + `.eh_frame_hdr` (~18.6 KB).**
+  Unwind tables from the *prebuilt* std, dead under `panic=abort` and immediate-abort since nothing unwinds, but this profile links prebuilt std, so no build flag drops them.
+  Reclaimable via build-std (`-Cforce-unwind-tables=no`) or a post-link `objcopy --remove-section .eh_frame --remove-section .eh_frame_hdr` (measured 118,608 → 99,956, −18,652 B) — the latter leaves a dangling `PT_GNU_EH_FRAME` program header, so validate at runtime before relying on it.
+  This is essentially the whole Windows/Linux gap.
+- **Dependency features: nothing left to trim.**
+  crossterm is at its floor ([#3](#3--crossterm-feature-floor)) — `events` is required for input, `windows` for raw mode/console, and crossterm has no `no_std` mode.
+  On Windows, `events` pulls `mio`/`signal-hook`/`signal-hook-mio` only under `cfg(unix)`, so they are not compiled.
+  And cargo *unions* features across the graph, so from our manifest we can only ever *add* a transitive dependency's features, never remove one crossterm's own edge requests — which is why the only lever that worked was `[patch]`-ing crossterm itself ([#13](#13--vendored-crossterm-ioctl-only-size), [#15](#15--vendored-crossterm-single-threaded-parking_lot-dropped)).
+- Everything else in `.text` is either ours (`main`, `ui::build_grid`, `app::submit`, `words::decode_word`) or genuinely-used std and crossterm — on Linux, notably the Unix input stack (`parse_event`, signal-hook, mio).
 
-## Summary
+## Panic handling
 
-- Baseline: 396,288
-- Stable optimized (default, no prerequisites): **214,016** (−46.0%)
-- build-std nightly, no `backtrace`, terminal still restored: **117,248** (−70.4%)
-- + immediate-abort, **Windows** (terminal not restored on panic): **64,297** (−83.8%)
-- + immediate-abort, **Linux** (x86_64-unknown-linux-gnu, vendored crossterm): **85,703** (−78.4%, pre-position/colour; not re-measured)
+### The hook
 
-Latest src wins (see the subsections above):
-- **Conditioned colour bit** — Windows 64,473 → 64,297 (−176 B); blob 14,449 → 14,283 (−166 B,
-  0.96 B/word). Colour `1166 → ~1000 B` by conditioning on the last letter. Linux not re-measured.
-- **Position-conditioned context** — Windows 65,169 → 64,473 (−696 B); blob 15,206 → 14,449
-  (−757 B, 0.97 B/word). Linux not re-measured this round.
-- **Searched word ordering** (`REVERSE_WORD`/`DESCENDING`) — 0 B this corpus (forward-ascending
-  still wins, const-folds to identical code); robustness for a future list, not a size win.
-- **Asymmetric decoder: fixed-array model storage** — Windows 65,777 → 65,169 (−608 B),
-  Linux 85,679 → 85,703 (+24 B, `lld` ICF/alignment; kept for the Windows gain).
-- **`codec::Model` deletes the parallel `total` Vec** — Windows 65,957 → 65,777 (−180 B),
-  Linux 85,691 → 85,679 (−12 B).
-- **`ui::render` home-once + CNL** — Windows 66,053 → 65,957 (−96 B), Linux 85,683 → 85,691 (+8 B,
-  `lld` ICF/alignment; kept for the Windows gain).
+`main` installs a minimal hook that restores the terminal and then exits.
+It deliberately does **not delegate to the default hook**: printing the panic message would pull in `io::stderr` and the `writeln!` machinery that the default path does not otherwise share, and every message-printing variant measured *larger* (delegating to `default_hook`: +416 B; `writeln!("{info}")`: more).
+On a bug-panic, the restored screen is what matters, not the text.
+For why it exits rather than returns, see [#23](#23--panic-hook-exit101-instead-of-returning).
 
-The prior round dropped `parking_lot` (single-threaded `UnsafeCell`s in place of crossterm's two
-global `Mutex`es — Windows −5,792 B, Linux −4,210 B; see `vendor/crossterm/LOCAL_PATCH.md` §2–3) and
-removed the decoder's per-word heap `Vec` (fixed `[u8; WORD_LEN]` buffers in `decode_word` /
-`words::Corpus` — Windows −216 B). Previously: Windows 72,061, Linux 89,903.
+### Where panics come from
 
-The two immediate-abort figures are the current numbers, after the arithmetic-coded data layer, the
-raw-ANSI output refactor, and the vendored ioctl-only `size()`; the stable / build-std-with-restore
-rows above predate that recent work and were not re-measured this round. Linux is now ~18 KB heavier
-than Windows, almost all of it the `.eh_frame` unwind tables (~18.6 KB, still stuck — see above),
-plus the genuinely-needed Unix input stack (`parse_event`, signal-hook, mio).
+- **Explicit (ours):** one on the runtime path — `unreachable!(..)` in `pick_target`.
+  There is no `unwrap`/`expect` at runtime; `main` handles every `Result` with `if let Ok`.
+- **Implicit (~99%):** bounds checks on every index, the range-coder divisions (`range /= tot`, `div_round`), slice ranges.
+
+Removing our explicit panics would save almost nothing: the implicit bounds checks keep `panic_bounds_check` → the panic runtime → the message formatting (`panic_with_hook`, the still reachable `default_hook`, `core::fmt`) all linked.
+The lever that works is [#11](#11---cpanicimmediate-abort), which removes the call sites themselves.
+
+### immediate-abort safety (manual audit)
+
+immediate-abort's cost is a dirty terminal on panic — which only bites if a panic is actually *reachable*.
+It is not.
+Every runtime panic site was traced by hand.
+The release profile sets `overflow-checks = false`, so integer overflow and underflow **wrap** and are not panics; the families left are out-of-bounds index/slice, divide-by-zero, `copy_from_slice` length mismatch, and explicit panics.
+**Verdict: no panic is reachable while the embedded `corpus.bin` is intact**, so the dirty-terminal case requires a corrupted binary — at which point terminal state is moot.
+
+Locally guaranteed, with no external assumption:
+
+- **`Grid` rendering (`ui.rs`)** — every write and read goes through `set`/`text`/`hit_rect`/`hit_test`, all guarded by `px < self.w && py < self.h`.
+  Off-screen access is a silent no-op, so the renderer cannot panic at any terminal size (even a `w == 0` underflow wraps to a huge index the bound rejects).
+- **`app.rs` indexing** — `history[input_idx]` is safe because `input_idx ∈ 0..=5` while `Playing` (`submit` flips to `Lost` as soon as `input_idx >= 6`) and every draft/typing path runs only in `Playing`; `keyboard_letter_states` slices `history[..input_idx]` with `input_idx <= 6 = history.len()`; `type_letter`/`backspace` are guarded on `input_len`; `copy_from_slice` copies two `[u8; 5]`; the lost-message pushes the target's uppercased bytes as `char`s (all ASCII, infallible).
+- **`ui.rs` layout math** — the sole runtime division (`div_round`) is called only from `gaps` with divisor `d = n - 1 >= 1` (guarded `n <= 1`); `gaps`/`stack_sizes` run with `n <= SECTION_COUNT = 4 < MAX_GUESSES`, so their fixed arrays never overflow; `col_budget` steps `cell` down from an odd `full` and stops at 1; `saturating_sub`/`div_ceil` guard every possible underflow.
+- **`game::check`** — bounds `0..WORD_LEN` over the `[u8; 5]` arrays `submit` passes.
+- **Range-coder divisions** (`decode_freq`: `range /= tot`, then `code / range`) — `range >= TOP = 2^24` is held by the renorm loops and every `tot <= WORD_COUNT = 14853 < 2^24`, so `range / tot >= 1` and `code / range` can never divide by zero.
+
+Two sites are **not** locally guarded; both reduce to the same assumption — that `corpus.bin` is exactly the encoder's output, fixed at build time and checked by the `corpus_round_trips` test.
+Both carry a source comment pointing here:
+
+1. **`unreachable!` in `pick_target` (`words.rs`)** — reached only if the stream holds fewer than `ANSWER_COUNT` colour-A words.
+   The encoder emits exactly `ANSWER_COUNT`.
+2. **Divide-by-zero in `decode_freq` via `tot == 0`** — the only zero total is `char_tot(ctx, lo)` with `lo == 26` (empty sum), which needs a word whose first differing character exceeds `'z'`.
+   The sort proves `w[p] > prev[p]` with `w[p] <= 25`, so `prev[p] <= 24` ⟹ `lo <= 25` ⟹ at least the `s = 25` term ⟹ `char_tot >= 1`.
+   The colour decode feeds `decode_freq(f0 + f1)` with `f0, f1 >= 1` (add-one smoothing), so its total is always `>= 2`.
+
+No runtime `assert!` was added to "lock" these: that would create panic sites and grow the binary — the opposite of the goal.
+The invariant is enforced where it belongs, at build time.
