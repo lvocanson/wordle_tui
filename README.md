@@ -1,6 +1,11 @@
 # wordle_tui
 
-Wordle in the terminal: full-screen board, on-screen keyboard, mouse **or** keyboard input, and a 14,853-word dictionary — in a **64 KB** binary built on one dependency (`crossterm`, plus `crossterm_winapi` on Windows, already in crossterm's own tree) with no runtime files.
+Wordle in the terminal: full-screen board, on-screen keyboard, mouse or keyboard input, and a 14,853-word dictionary — in a **64 KB** binary built on one dependency (`crossterm`, plus `crossterm_winapi` on Windows, already in crossterm's own tree) with no runtime files.
+
+<p align="center">
+  <img src="docs/demo.gif" width="400"
+       alt="A game in progress: letters land on the board and turn green, yellow or grey, and the on-screen keyboard tracks the best score seen for each letter.">
+</p>
 
 ```bash
 cargo run --release
@@ -24,6 +29,12 @@ A submitted guess must be in the dictionary; each letter comes back **green** (r
 
 The layout adapts to the terminal: as height becomes available, features switch on in priority order — board, message line, keyboard, controls line, row gaps, full-height cells, title.
 It still plays in a terminal only 5 columns by 6 rows.
+
+<p align="center">
+  <img src="docs/resize.gif" width="480"
+       alt="The terminal shrinks one row at a time: the title, row gaps, keyboard and controls line switch off one by one, then switch back on as it grows again.">
+</p>
+
 The game runs on the alternate screen and restores the terminal on exit (and on a panic, in the profiles that keep the panic hook).
 
 ## Build-time configuration
@@ -59,9 +70,10 @@ See [OPTIMIZATION.md](OPTIMIZATION.md) for how the encoding was arrived at.
 | `src/ui.rs` | layout, grid model, hit-testing, raw-ANSI renderer |
 | `src/words.rs` | word database over the embedded corpus |
 | `src/codec.rs` | range decoder and the model math both ends share |
-| `build/codec_enc.rs` | the encoder-only half of the codec, kept out of the binary |
 | `build/` | build script: compresses `res/` into `corpus.bin` + `constants.rs` |
+| `build/codec_enc.rs` | the encoder-only half of the codec, kept out of the binary |
 | `res/` | source word lists, 3 to 7 letters |
+| `docs/` | the README's demo GIFs |
 | `tools/stats.rs` | compression and binary-size reporter (`cargo run --example stats`) |
 | `tools/validate.sh` | one-shot tests + Windows/Linux builds + size report |
 | `vendor/crossterm/` | patched crossterm 0.29.0, opt-in (see its `LOCAL_PATCH.md`) |
