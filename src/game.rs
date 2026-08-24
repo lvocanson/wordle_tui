@@ -148,10 +148,10 @@ impl Game {
 
         let guess = &mut self.guesses[self.draft_idx];
         let scores = check(&self.target, &guess.word);
-        for col in 0..WORD_LEN {
-            guess.result[col] = LetterState::Submitted(scores[col]);
-            let key = &mut self.keyboard[(guess.word[col] - b'a') as usize];
-            *key = Some(better_score(*key, scores[col]));
+        for ((res, &score), &ch) in guess.result.iter_mut().zip(&scores).zip(&guess.word) {
+            *res = LetterState::Submitted(score);
+            let key = &mut self.keyboard[(ch - b'a') as usize];
+            *key = Some(better_score(*key, score));
         }
         self.draft_idx += 1;
         self.draft_len = 0;

@@ -3,9 +3,10 @@
 // logic. It is the only place that panics — every step below returns an error the orchestration
 // here turns into a readable build failure.
 
-#[allow(dead_code)] // the decoder half of the codec is exercised by the game, not the build
+#[allow(dead_code)]
 #[path = "../src/codec.rs"]
 mod codec;
+mod codec_enc;
 mod encode;
 mod words;
 
@@ -103,13 +104,13 @@ fn main() {
              pub const COLOR_POS: usize = {};\n\
              pub const MAX_GUESSES: usize = {max_guesses};\n",
             corpus.len(),
-            best.order,
-            best.use_pos,
-            best.inc,
-            best.reverse_word,
-            best.descending,
-            best.use_color,
-            best.color_pos,
+            best.scheme.order,
+            best.scheme.use_pos,
+            best.scheme.inc,
+            best.scheme.reverse_word,
+            best.scheme.descending,
+            best.scheme.use_color,
+            best.scheme.color_pos,
         ),
     )
     .unwrap_or_else(|e| panic!("cannot write constants.rs: {e}"));

@@ -3,7 +3,8 @@
 // is shared with the decoder through the `codec` module, so encode and decode agree bit for
 // bit.
 
-use crate::codec::{self, common_prefix, RangeEncoder};
+use crate::codec;
+use crate::codec_enc::{self, common_prefix, RangeEncoder};
 
 // Model-search bounds. Order-3 (27^3 = 19,683 contexts) already exceeds the decoder's stack table
 // limit (`codec::MAX_STACK_CTX`), so it can never be baked — cap at 2 and let the per-scheme filter
@@ -46,7 +47,7 @@ impl Model {
     }
 
     fn char_freq(&self, ctx: usize, sym: usize) -> u32 {
-        codec::char_freq(&self.counts[ctx], sym)
+        codec_enc::char_freq(&self.counts[ctx], sym)
     }
 
     fn char_tot(&self, ctx: usize, lo: usize, hi: usize) -> u32 {
@@ -54,7 +55,7 @@ impl Model {
     }
 
     fn char_cum(&self, ctx: usize, lo: usize, sym: usize) -> u32 {
-        codec::char_cum(&self.counts[ctx], lo, sym)
+        codec_enc::char_cum(&self.counts[ctx], lo, sym)
     }
 
     fn update(&mut self, ctx: usize, sym: usize) {
@@ -62,7 +63,7 @@ impl Model {
     }
 
     fn pref_freq(&self, p: usize) -> u32 {
-        codec::pref_freq(&self.pref, p)
+        codec_enc::pref_freq(&self.pref, p)
     }
 
     fn pref_tot(&self) -> u32 {
@@ -70,7 +71,7 @@ impl Model {
     }
 
     fn pref_cum(&self, p: usize) -> u32 {
-        codec::pref_cum(&self.pref, p)
+        codec_enc::pref_cum(&self.pref, p)
     }
 
     fn pref_update(&mut self, p: usize) {
@@ -128,14 +129,14 @@ fn ordered(corpus: &[TaggedWord], reverse_word: bool, descending: bool) -> Vec<T
 // Encode one already-ordered corpus under one full scheme and return the blob. The colour bit after
 // each word is coded by an adaptive binary model conditioned on the letter at `color_pos` (or a
 // single shared model when `!use_color`), mirroring decode_color/Corpus in src/words.rs.
-fn encode_corpus(corpus: &[TaggedWord], word_len: usize, order: usize, use_pos: bool, descending: bool, inc: u16, use_color: bool, color_pos: usize) -> Vec<u8> {
+fn encode_corpus(corpus: &[TaggedWord], word_len: usize, s: Scheme) -> Vec<u8> {
     let mut enc = RangeEncoder::new();
-    let mut model = Model::new(word_len, order, use_pos, inc);
-    let mut color = vec![[0u32; 2]; codec::color_nctx(use_color)];
+    let mut model = Model::new(word_len, s.order, s.use_pos, s.inc);
+    let mut color = vec![[0u32; 2]; codec::color_nctx(s.use_color)];
     let mut prev: Option<&[u8]> = None;
     for (w, is_answer) in corpus {
-        encode_word(&mut enc, &mut model, prev, w, word_len, descending);
-        let cc = codec::color_ctx(w, use_color, color_pos);
+        encode_word(&mut enc, &mut model, prev, w, word_len, s.descending);
+        let cc = codec::color_ctx(w, s.use_color, s.color_pos);
         let (f0, f1) = (color[cc][0] + 1, color[cc][1] + 1);
         if *is_answer {
             enc.encode(f0, f1, f0 + f1);
@@ -149,8 +150,11 @@ fn encode_corpus(corpus: &[TaggedWord], word_len: usize, order: usize, use_pos: 
     enc.finish()
 }
 
-// The winning scheme: which knobs compressed this corpus smallest, plus its blob.
-pub struct Best {
+// One point in the model space: every knob the search tries, each of which the decoder bakes as a
+// constant. Grouped so the search passes it as one value — five consecutive bools and usizes as
+// positional arguments is an inversion waiting to happen, and an inverted knob still compiles.
+#[derive(Clone, Copy)]
+pub struct Scheme {
     pub order: usize,
     pub use_pos: bool,
     pub inc: u16,
@@ -158,6 +162,11 @@ pub struct Best {
     pub descending: bool,
     pub use_color: bool,
     pub color_pos: usize,
+}
+
+// The winning scheme: which knobs compressed this corpus smallest, plus its blob.
+pub struct Best {
+    pub scheme: Scheme,
     pub blob: Vec<u8>,
 }
 
@@ -183,9 +192,10 @@ pub fn best_model(corpus: &[TaggedWord], word_len: usize) -> Best {
                     }
                     for inc in 1..=MAX_INC {
                         for (use_color, color_pos) in color_schemes.clone() {
-                            let blob = encode_corpus(&ord, word_len, order, use_pos, descending, inc, use_color, color_pos);
-                            if best.as_ref().map_or(true, |b| blob.len() < b.blob.len()) {
-                                best = Some(Best { order, use_pos, inc, reverse_word, descending, use_color, color_pos, blob });
+                            let scheme = Scheme { order, use_pos, inc, reverse_word, descending, use_color, color_pos };
+                            let blob = encode_corpus(&ord, word_len, scheme);
+                            if best.as_ref().is_none_or(|b| blob.len() < b.blob.len()) {
+                                best = Some(Best { scheme, blob });
                             }
                         }
                     }

@@ -58,7 +58,8 @@ See [OPTIMIZATION.md](OPTIMIZATION.md) for how the encoding was arrived at.
 | `src/game.rs` | rules: target, guesses, scoring, phase |
 | `src/ui.rs` | layout, grid model, hit-testing, raw-ANSI renderer |
 | `src/words.rs` | word database over the embedded corpus |
-| `src/codec.rs` | range coder and model math, shared by encoder and decoder |
+| `src/codec.rs` | range decoder and the model math both ends share |
+| `build/codec_enc.rs` | the encoder-only half of the codec, kept out of the binary |
 | `build/` | build script: compresses `res/` into `corpus.bin` + `constants.rs` |
 | `res/` | source word lists, 3 to 7 letters |
 | `tools/stats.rs` | compression and binary-size reporter (`cargo run --example stats`) |

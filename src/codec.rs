@@ -1,8 +1,8 @@
-// Arithmetic-coding codec shared by both ends of the pipeline: the build script pulls this
-// file in as a module for the encoder (`#[path = "../src/codec.rs"] mod codec`), and the crate
-// compiles it as a module for the decoder. What is shared is the *arithmetic* — the range coder
-// and the adaptive model's probability math — because that is what has to agree bit for bit; any
-// divergence would silently corrupt the stream. The two ends differ only in *storage*: the
+// Arithmetic-coding codec, decoder side plus everything both ends share: the crate compiles this
+// file as a module for the decoder, and the build script pulls the same file in for the encoder
+// (`#[path = "../src/codec.rs"] mod codec`). What is shared is the *arithmetic* — the context
+// derivation, the count updates and the running totals — because that is what has to agree bit for
+// bit; any divergence would silently corrupt the stream. The two ends differ only in *storage*: the
 // encoder searches `order`/`inc`/`word_len` and so holds its model counts in `Vec`s
 // (`build/encode.rs`), while the decoder knows them as compile-time constants and holds them in
 // fixed arrays (`words.rs`). Both wrap the same storage-agnostic functions below, so there is one
@@ -23,60 +23,8 @@
 
 // --- Range coder (LZMA-style, 32-bit range, byte carry via a cache) --------------------
 
-const TOP: u32 = 1 << 24;
-
-// Encoder side. Only used by build.rs; the crate never instantiates it (LTO drops it).
-#[allow(dead_code)]
-pub struct RangeEncoder {
-    low: u64,
-    range: u32,
-    cache: u8,
-    cache_size: u64,
-    pub out: Vec<u8>,
-}
-
-#[allow(dead_code)]
-impl RangeEncoder {
-    pub fn new() -> Self {
-        // cache_size starts at 1 so the first shift emits one leading byte the decoder skips.
-        RangeEncoder { low: 0, range: 0xFFFF_FFFF, cache: 0, cache_size: 1, out: Vec::new() }
-    }
-
-    fn shift_low(&mut self) {
-        if (self.low as u32) < 0xFF00_0000 || (self.low >> 32) != 0 {
-            let carry = (self.low >> 32) as u8;
-            let mut byte = self.cache;
-            loop {
-                self.out.push(byte.wrapping_add(carry));
-                byte = 0xFF;
-                self.cache_size -= 1;
-                if self.cache_size == 0 {
-                    break;
-                }
-            }
-            self.cache = (self.low >> 24) as u8;
-        }
-        self.cache_size += 1;
-        self.low = (self.low << 8) & 0xFFFF_FFFF;
-    }
-
-    pub fn encode(&mut self, cum: u32, freq: u32, tot: u32) {
-        self.range /= tot;
-        self.low += cum as u64 * self.range as u64;
-        self.range = self.range.wrapping_mul(freq);
-        while self.range < TOP {
-            self.range <<= 8;
-            self.shift_low();
-        }
-    }
-
-    pub fn finish(mut self) -> Vec<u8> {
-        for _ in 0..5 {
-            self.shift_low();
-        }
-        self.out
-    }
-}
+// Renormalization threshold, read by both coders (`build/codec_enc.rs` holds the encoder).
+pub const TOP: u32 = 1 << 24;
 
 // Decoder side. Used by game.rs; harmlessly dead in build.rs.
 pub struct RangeDecoder<'a> {
@@ -151,15 +99,6 @@ pub const CTX_SYMS: usize = 27;
 // add-one smoothing) well under the coder's frequency ceiling regardless of `inc`.
 const LIMIT: u32 = 1 << 13;
 
-#[allow(dead_code)] // encoder side (build.rs)
-pub fn common_prefix(a: &[u8], b: &[u8]) -> usize {
-    let mut i = 0;
-    while i < a.len() && i < b.len() && a[i] == b[i] {
-        i += 1;
-    }
-    i
-}
-
 // Fold the `order` characters preceding position `i` — and, when `use_pos`, the position `i`
 // itself — into a context index. Position is a strong predictor in fixed-length words (letter
 // distributions differ sharply by slot), so `use_pos` is one of the knobs build.rs searches and
@@ -194,6 +133,7 @@ pub const MAX_STACK_CTX: usize = CTX_SYMS * CTX_SYMS;
 // descending (the sort direction is a build-searched constant). `hi` folds to 26 on the ascending
 // path, leaving that hot path identical. Effective frequency is `count + 1` (add-one smoothing).
 #[inline]
+#[allow(clippy::needless_range_loop)] // Measured: the slice + `sum()` form costs 64 B.
 pub fn char_tot(row: &[u16; 26], lo: usize, hi: usize) -> u32 {
     let mut t = 0;
     for s in lo..hi {
@@ -202,22 +142,10 @@ pub fn char_tot(row: &[u16; 26], lo: usize, hi: usize) -> u32 {
     t
 }
 
-#[allow(dead_code)] // encoder side (build.rs)
-pub fn char_freq(row: &[u16; 26], sym: usize) -> u32 {
-    row[sym] as u32 + 1
-}
-
-#[allow(dead_code)] // encoder side (build.rs)
-pub fn char_cum(row: &[u16; 26], lo: usize, sym: usize) -> u32 {
-    let mut c = 0;
-    for s in lo..sym {
-        c += row[s] as u32 + 1;
-    }
-    c
-}
-
-// Inverse of char_cum: map a decoded frequency point in `[lo, hi)` back to (symbol, cum, freq).
+// Inverse of the encoder's `char_cum` (build/codec_enc.rs): map a decoded frequency point in
+// `[lo, hi)` back to (symbol, cum, freq).
 #[inline]
+#[allow(clippy::needless_range_loop)] // Measured: `enumerate()` over `row[lo..hi]` costs 80 B.
 pub fn char_find(row: &[u16; 26], lo: usize, hi: usize, dv: u32) -> (usize, u32, u32) {
     let mut acc = 0;
     for s in lo..hi {
@@ -248,24 +176,11 @@ pub fn pref_tot(pref: &[u16], total: u32) -> u32 {
     total + pref.len() as u32
 }
 
-#[allow(dead_code)] // encoder side (build.rs)
-pub fn pref_freq(pref: &[u16], p: usize) -> u32 {
-    pref[p] as u32 + 1
-}
-
-#[allow(dead_code)] // encoder side (build.rs)
-pub fn pref_cum(pref: &[u16], p: usize) -> u32 {
-    let mut c = 0;
-    for s in 0..p {
-        c += pref[s] as u32 + 1;
-    }
-    c
-}
-
+// Inverse of the encoder's `pref_cum` (build/codec_enc.rs).
 pub fn pref_find(pref: &[u16], dv: u32) -> (usize, u32, u32) {
     let mut acc = 0;
-    for s in 0..pref.len() {
-        let f = pref[s] as u32 + 1;
+    for (s, &c) in pref.iter().enumerate() {
+        let f = c as u32 + 1;
         if acc + f > dv {
             return (s, acc, f);
         }

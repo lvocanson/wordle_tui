@@ -170,7 +170,8 @@ Lookups walk the compressed stream directly instead of decoding it once into a `
 Both lists merged into one adaptive-model arithmetic-coded stream (`src/codec.rs`, encoder in `build/`), replacing the varint scheme; the source was split into `build/` modules in the same pass.
 Small on the binary, but it is the foundation the data work in [#19](#19--position-conditioned-context) and [#21](#21--conditioned-colour-bit) builds on.
 
-The encoder (build) and decoder (game) share `codec.rs`'s range coder and model *math*, so they agree bit-for-bit — the `corpus_round_trips` test guards this.
+The encoder (build) and decoder (game) share `codec.rs`'s model *math*, so they agree bit-for-bit — the `corpus_round_trips` test guards this.
+The halves that only one end runs live apart: the range decoder and the reverse lookups in `src/codec.rs`, the range encoder and the forward lookups in `build/codec_enc.rs`, which the binary never compiles.
 They no longer share its *storage*; see [#18](#18--asymmetric-decoder-fixed-array-model-storage).
 
 ### 9 — `/DEBUG:NONE` (PE) / `--build-id=none` (ELF)
