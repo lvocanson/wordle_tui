@@ -89,3 +89,9 @@ Size is the project's main constraint; the whole record lives in [OPTIMIZATION.m
 - **[BUILD.md](BUILD.md)** — the build command for every profile on every platform.
 - **[OPTIMIZATION.md](OPTIMIZATION.md)** — measured size changelog, measurement method, what is still stuck.
 - **[vendor/crossterm/LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md)** — what the vendored crossterm changes, and why.
+
+## License
+
+[MIT](LICENSE).
+
+The vendored crossterm in `vendor/crossterm/` is MIT too, © 2019 Timon — its own [LICENSE](vendor/crossterm/LICENSE) applies to that subtree and is kept alongside it.

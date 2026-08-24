@@ -2,3 +2,6 @@
 
 # Claude Code local/session artifacts (personal settings, worktrees).
 /.claude
+
+# JetBrains IDE files.
+/.idea
