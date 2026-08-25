@@ -1,5 +1,7 @@
 # wordle_tui
 
+[![CI](https://github.com/lvocanson/wordle_tui/actions/workflows/ci.yml/badge.svg)](https://github.com/lvocanson/wordle_tui/actions/workflows/ci.yml)
+
 Wordle in the terminal: full-screen board, on-screen keyboard, mouse or keyboard input, and a 14,853-word dictionary — in a **64 KB** binary built on one dependency (`crossterm`, plus `crossterm_winapi` on Windows, already in crossterm's own tree) with no runtime files.
 
 <p align="center">
