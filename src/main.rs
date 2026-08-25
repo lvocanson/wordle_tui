@@ -69,7 +69,7 @@ fn run(out: &mut Stdout) -> io::Result<()> {
         size.0 as usize,
         size.1 as usize,
         &app.game,
-        app.message.as_deref(),
+        app.message(),
         app.controls,
     ); // kept for hit-testing
 
@@ -79,7 +79,7 @@ fn run(out: &mut Stdout) -> io::Result<()> {
                 size.0 as usize,
                 size.1 as usize,
                 &app.game,
-                app.message.as_deref(),
+                app.message(),
                 app.controls,
             );
             ui::render(out, &grid)?;

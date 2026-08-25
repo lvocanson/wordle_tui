@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# One-shot validation for the size work: tests + Windows size + Linux size + cargo-bloat, all in a
-# single run so there are no back-and-forth invocations.
+# One-shot validation for the size work: tests + Windows size + Linux size + symbol bloat
+# (tools/bloat.rs over the linker maps), all in a single run so there are no back-and-forth
+# invocations.
 #
 # Run from anywhere (it cd's to the repo root). Use Git Bash on Windows:
 #   bash tools/validate.sh                 # everything (tests, Win, Linux/WSL, bloat)
 #   bash tools/validate.sh --no-linux      # skip the WSL/Linux build
-#   bash tools/validate.sh --no-bloat      # skip cargo bloat (the slow part)
+#   bash tools/validate.sh --no-bloat      # skip the symbol-bloat report
 #   bash tools/validate.sh --quick         # tests + Windows size only (= --no-linux --no-bloat)
 #
 # Both platforms are measured with the same reporter (tools/stats.rs), so the section totals and
@@ -30,8 +31,10 @@ trap 'rm -f "$LOG"; git checkout -- Cargo.lock 2>/dev/null || true' EXIT
 # re-measure the reference totals when you do.
 NIGHTLY='nightly-2026-08-25'
 
-WIN_FLAGS='-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clink-arg=/OPT:ICF -Clink-arg=/DEBUG:NONE'
-LIN_FLAGS='-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none'
+# The /MAP and -Map args make the link emit its symbol map (byte-neutral, verified — see
+# OPTIMIZATION.md "Symbol attribution"); tools/bloat.rs reads it. Same lines as BUILD.md.
+WIN_FLAGS='-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clink-arg=/OPT:ICF -Clink-arg=/DEBUG:NONE -Clink-arg=/MAP:target/wordle_tui.map'
+LIN_FLAGS='-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none -Clink-arg=-Wl,-Map=target/wordle_tui-linux.map'
 CONFIG='--config .cargo/crossterm-patch.toml'
 WIN_TARGET='x86_64-pc-windows-msvc'
 LIN_TARGET='x86_64-unknown-linux-gnu'
@@ -122,21 +125,20 @@ fi
 
 # ---------------------------------------------------------------------------
 if [ "$DO_BLOAT" = 1 ]; then
-  # WARNING: cargo-bloat is only a rough HINT generator for this binary, for two reasons:
-  #   1. The `--config` crossterm patch is NOT reliably applied under `cargo bloat`, so bloat
-  #      often measures UPSTREAM crossterm. Symptom: it still lists parking_lot / Once / env::var
-  #      even though the shipping binary has dropped them (the marker check above is the proof).
-  #      (Cargo's "patch ... was not used" warning is NOT a signal either way — see that check.)
-  #   2. `/OPT:ICF` folds identical functions, so bloat attributes a folded body to an arbitrary,
-  #      often-dead symbol name.
-  # Ground truth is always the measured `total` delta from stats.rs, never a bloat number. Confirm
-  # any lead by string-probing the binary and a measured rebuild. See OPTIMIZATION.md "Stuck costs".
-  section "CARGO BLOAT — by crate (HINTS ONLY — see caveats above)"
-  RUSTFLAGS="$WIN_FLAGS" cargo "+$NIGHTLY" bloat --release --target "$WIN_TARGET" $CONFIG --crates -n 15 2>&1 \
-    | sed -n '/File .*Crate/,$p'
-  section "CARGO BLOAT — by function, top 30 (HINTS ONLY — see caveats above)"
-  RUSTFLAGS="$WIN_FLAGS" cargo "+$NIGHTLY" bloat --release --target "$WIN_TARGET" $CONFIG -n 30 2>&1 \
-    | sed -n '/File .*Name/,$p'
+  # Symbol attribution from the linker maps the builds above just emitted (tools/bloat.rs).
+  # Post-LTO/ICF ground truth on the exact shipping binary — replaces cargo-bloat, whose two
+  # failure modes (measuring upstream crossterm, misattributing ICF folds) are documented in
+  # OPTIMIZATION.md "Symbol attribution".
+  section "SYMBOL BLOAT — Windows (tools/bloat.rs over target/wordle_tui.map)"
+  if try "bloat (windows)" cargo run --example bloat -- target/wordle_tui.map -n 25; then
+    sed -n '/symbol bloat/,$p' "$LOG"
+  fi
+  if [ "$DO_LINUX" = 1 ]; then
+    section "SYMBOL BLOAT — Linux (tools/bloat.rs over target/wordle_tui-linux.map)"
+    if try "bloat (linux)" cargo run --example bloat -- target/wordle_tui-linux.map -n 25; then
+      sed -n '/symbol bloat/,$p' "$LOG"
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------------------

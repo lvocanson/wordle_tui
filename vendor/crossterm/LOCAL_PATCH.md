@@ -1,20 +1,25 @@
 # Vendored crossterm 0.29.0 — local patch
 
-The crates.io source of **crossterm 0.29.0** with three targeted changes, kept in-tree and used **opt-in** by the size-optimized builds.
+The crates.io source of **crossterm 0.29.0** with six targeted changes, kept in-tree and used **opt-in** by the size-optimized builds.
 This file is the single place that explains the vendoring; `Cargo.toml`, `.cargo/*`, [BUILD.md](../../BUILD.md) and [OPTIMIZATION.md](../../OPTIMIZATION.md) only point here.
 Every patched site carries a `// LOCAL PATCH — see …LOCAL_PATCH.md` marker.
 
-All three changes rest on the same fact: **this app is single-threaded** — one event-loop thread in `main::run`, no thread is spawned anywhere — so crossterm's global synchronization, and its fallback paths for hostile environments, are pure overhead.
+Changes 1–3 rest on the same fact: **this app is single-threaded** — one event-loop thread in `main::run`, no thread is spawned anywhere — so crossterm's global synchronization, and its fallback paths for hostile environments, are pure overhead.
+Changes 4–6 remove what this app never reads: error-message payloads, full-unicode key case mapping, and sub-millisecond poll timing.
 
 | # | Change | Patched file | Δ Windows | Δ Linux |
 |---|--------|--------------|----------:|--------:|
 | 1 | ioctl-only `terminal::size()` | `src/terminal/sys/unix.rs` | 0 | −28,705 |
 | 2 | Event reader without `parking_lot::Mutex` | `src/event.rs` | −5,792 | ≈ 0 |
 | 3 | Raw-mode state without `parking_lot::Mutex` | `src/terminal/sys/unix.rs` | 0 | −4,210 |
+| 4 | No `io::Error` message payloads | `event/read.rs`, `event/sys/windows{,/poll}.rs`, `event/sys/unix/parse.rs` | −6,580 | ≈ 0 * |
+| 5 | ASCII-only key case correction | `event/sys/windows/parse.rs` | −6,108 | 0 |
+| 6 | Millisecond poll clock | `event/timeout.rs` | −534 | 0 |
 
 Bytes are un-padded section totals on the immediate-abort profile, the metric [OPTIMIZATION.md](../../OPTIMIZATION.md) compares.
-A `0` marks a platform the change structurally cannot affect (both patched files are Unix-only; Windows has its own `sys` module).
+A `0` marks a platform the change structurally cannot affect (the patched file or branch is for the other platform).
 Changes 2 and 3 remove the same dependency from opposite ends, so their per-platform figures are not independent — see change 3.
+`*` Changes 4–6 were measured on Linux only in aggregate: sections shrink ~430 B (`.text`, `.rodata`, `.eh_frame`, `.rela.dyn`) but RELRO page alignment grows `.relro_padding` by almost exactly that, for a net −1 B total.
 
 ## How it is wired
 
@@ -94,6 +99,32 @@ Validated end-to-end on a real Linux PTY — typed a word, submitted it, quit wi
 The invariant is the app's, not crossterm's: this copy is **not** safe for a multi-threaded consumer.
 That is precisely why it stays opt-in and out of upstream.
 
+## 4. No `io::Error` message payloads
+
+Every **live** `io::Error::new(kind, "message")` becomes `io::Error::from(kind)`; dead sites (bracketed-paste, keyboard-enhancement, `set_size`, cursor) are left untouched since LTO already drops them.
+Patched sites: `event/read.rs` (reader-init failure), `event/sys/windows/poll.rs` (unexpected `WaitForMultipleObjects` result), `event/sys/windows.rs` (`original_console_mode`), `event/sys/unix/parse.rs` (`could_not_parse_event_error`).
+
+Why it is so large: a `&str` payload monomorphizes `From<&str> for Box<dyn Error>`, and the boxed `StringError`'s `Debug` vtable reaches `str`'s `escape_debug`, anchoring `core::unicode`'s printable-class and grapheme tables (~3.4 KB of `.rdata`) plus `core::fmt` glue (~3.2 KB of `.text`) — found by linker-map attribution, see OPTIMIZATION.md.
+Nothing in this app ever reads an error message: `main` handles every `Result` with `if let Ok` and exits.
+
+Measured on Windows (immediate-abort): **64,296 → 57,716 B, −6,580 B**.
+
+## 5. ASCII-only key case correction
+
+`event/sys/windows/parse.rs`, `try_ensure_char_case` — the shift/capslock case fix-up uses `to_ascii_lowercase`/`to_ascii_uppercase` instead of the full-unicode `to_lowercase()`/`to_uppercase()` iterators, whose case-mapping tables cost ~5 KB of `.rdata` + ~1 KB of `.text`.
+Behaviour changes only for non-ASCII keyboard input: such characters now pass through in whatever case the keyboard layout produced instead of being re-cased.
+This game only accepts `is_ascii_alphabetic` input (and lowercases it itself), so the difference is unobservable here.
+
+Measured on Windows (immediate-abort): **57,716 → 51,608 B, −6,108 B**.
+
+## 6. Millisecond poll clock
+
+`event/timeout.rs` — on Windows, `PollTimeout` stamps `GetTickCount64()` (u64 milliseconds) instead of `Instant`, which there is `QueryPerformanceCounter` behind a `Once`-cached frequency plus 128-bit `Duration` arithmetic.
+Millisecond resolution is exactly what `WaitForMultipleObjects` consumes anyway; Unix keeps `Instant` (a thin `clock_gettime`, nothing to save).
+The only `unsafe` is the `GetTickCount64` FFI call (kernel32, always linked, cannot fail).
+
+Measured on Windows (immediate-abort): **51,608 → 51,074 B, −534 B**.
+
 ## Upgrading crossterm
 
 For the default build, bump the upstream version in the workspace `Cargo.toml` as usual — nothing here is involved.
@@ -105,7 +136,7 @@ To review the current patch, or to check that a re-vendor left exactly the inten
 diff -ru ~/.cargo/registry/src/index.crates.io-*/crossterm-0.29.0/src vendor/crossterm/src
 ```
 
-For 0.29.0 that reports exactly two differing files — `src/event.rs` and `src/terminal/sys/unix.rs`, the latter carrying changes 1 and 3 — and `Cargo.toml` byte-identical to upstream apart from line endings.
+For 0.29.0 that reports exactly the files listed in the table above (plus `Cargo.toml` byte-identical to upstream apart from line endings); every hunk carries its `LOCAL PATCH` marker.
 
 ## What is kept
 

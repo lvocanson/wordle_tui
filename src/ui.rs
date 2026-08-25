@@ -238,29 +238,29 @@ fn draw_title(grid: &mut Grid, x: usize, y: usize, w: usize) {
 
 fn draw_footer(
     grid: &mut Grid,
-    message: Option<&str>,
+    message: Option<&[u8]>,
     controls: &str,
     x: usize,
     y: usize,
     w: usize,
     h: usize,
 ) {
-    let msg = message.unwrap_or("");
+    let msg = message.unwrap_or(b"");
     // Center each line, and clip it to the band so an over-long message can't spill
     // past the right edge into neighbouring cells.
-    let put = |grid: &mut Grid, row: usize, s: &str, fg: &'static [u8]| {
+    let put = |grid: &mut Grid, row: usize, s: &[u8], fg: &'static [u8]| {
         let off = (w / 2).saturating_sub(s.len() / 2);
         let visible = s.len().min(w.saturating_sub(off));
-        grid.text(x + off, row, &s.as_bytes()[..visible], fg);
+        grid.text(x + off, row, &s[..visible], fg);
     };
     if h >= FOOTER_H {
         put(grid, y, msg, COLOR_RED_TEXT);
-        put(grid, y + 1, controls, COLOR_WHITE_TEXT);
+        put(grid, y + 1, controls.as_bytes(), COLOR_WHITE_TEXT);
     } else if h >= 1 {
         if message.is_some() {
             put(grid, y, msg, COLOR_RED_TEXT);
         } else {
-            put(grid, y, controls, COLOR_WHITE_TEXT);
+            put(grid, y, controls.as_bytes(), COLOR_WHITE_TEXT);
         }
     }
 }
@@ -388,7 +388,7 @@ enum Section {
     Footer,
 }
 
-pub fn build_grid(w: usize, h: usize, game: &Game, message: Option<&str>, controls: &str) -> Grid {
+pub fn build_grid(w: usize, h: usize, game: &Game, message: Option<&[u8]>, controls: &str) -> Grid {
     let mut grid = Grid::new(w, h);
 
     // Below a usable minimum, point at the axis that's too small instead of drawing a

@@ -1,10 +1,42 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(windows))]
+use std::time::Instant;
+
+// LOCAL PATCH — see …LOCAL_PATCH.md: on Windows the clock is millisecond ticks (GetTickCount64)
+// instead of `Instant`. `Instant` there is QueryPerformanceCounter behind a `Once`-cached
+// frequency plus 128-bit Duration arithmetic; poll timeouts only need the millisecond resolution
+// that `WaitForMultipleObjects` consumes anyway. Unix keeps `Instant` (a thin clock_gettime).
+#[cfg(windows)]
+type Stamp = u64;
+#[cfg(not(windows))]
+type Stamp = Instant;
+
+#[cfg(windows)]
+extern "system" {
+    fn GetTickCount64() -> u64;
+}
+
+fn stamp_now() -> Stamp {
+    #[cfg(windows)]
+    unsafe {
+        GetTickCount64()
+    }
+    #[cfg(not(windows))]
+    Instant::now()
+}
+
+fn stamp_elapsed(start: Stamp) -> Duration {
+    #[cfg(windows)]
+    return Duration::from_millis(stamp_now().wrapping_sub(start));
+    #[cfg(not(windows))]
+    start.elapsed()
+}
 
 /// Keeps track of the elapsed time since the moment the polling started.
 #[derive(Debug, Clone)]
 pub struct PollTimeout {
     timeout: Option<Duration>,
-    start: Instant,
+    start: Stamp,
 }
 
 impl PollTimeout {
@@ -12,7 +44,7 @@ impl PollTimeout {
     pub fn new(timeout: Option<Duration>) -> PollTimeout {
         PollTimeout {
             timeout,
-            start: Instant::now(),
+            start: stamp_now(),
         }
     }
 
@@ -21,14 +53,14 @@ impl PollTimeout {
     /// It always returns `false` if the initial timeout was set to `None`.
     pub fn elapsed(&self) -> bool {
         self.timeout
-            .map(|timeout| self.start.elapsed() >= timeout)
+            .map(|timeout| stamp_elapsed(self.start) >= timeout)
             .unwrap_or(false)
     }
 
     /// Returns the timeout leftover (initial timeout duration - elapsed duration).
     pub fn leftover(&self) -> Option<Duration> {
         self.timeout.map(|timeout| {
-            let elapsed = self.start.elapsed();
+            let elapsed = stamp_elapsed(self.start);
 
             if elapsed >= timeout {
                 Duration::from_secs(0)

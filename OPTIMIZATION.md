@@ -18,7 +18,7 @@ That fell at change [#2](#changelog); the work continued from there.
 | Baseline — first crossterm+ratatui TUI | 396,288 | — | — |
 | Stable — no prerequisites, cross-platform | 214,016 (−46.0%) | 418,184 | 505,872 |
 | `build-std` — nightly, std without `backtrace`; terminal still restored on panic | 117,248 (−70.4%) | 184,760 | 279,568 |
-| `immediate-abort` — nightly, most aggressive; terminal **not** restored on panic | **64,296** (−83.8%) | 81,600 | 148,784 |
+| `immediate-abort` — nightly, most aggressive; terminal **not** restored on panic | **50,898** (−87.2%) | 81,599 | 148,784 |
 
 Caveats on that table, all of them about *when* a number was taken:
 
@@ -28,7 +28,7 @@ Caveats on that table, all of them about *when* a number was taken:
   To compare platforms, re-measure both under the same lever.
   Linux currently runs ~17 KB heavier than Windows, most of it the `.eh_frame` unwind tables (see [Stuck costs](#stuck-costs)).
 
-The embedded corpus accounts for 14,283 B — 22% of the current Windows binary.
+The embedded corpus accounts for 14,283 B — 28% of the current Windows binary.
 
 ## How sizes are measured
 
@@ -60,7 +60,7 @@ Each run also records its section sizes in a `.sections` sidecar next to the mea
 The build script runs before linking and cannot see the final binary, which is why this is a post-build tool rather than a `cargo:warning`.
 
 **Full validation run.**
-`tools/validate.sh` does everything in one invocation — tests, the Windows build and its size, the Linux build and size through WSL (both measured with the same `stats.rs` reporter), and `cargo bloat` — on the shipping profile (immediate-abort + vendored crossterm).
+`tools/validate.sh` does everything in one invocation — tests, the Windows build and its size, the Linux build and size through WSL (both measured with the same `stats.rs` reporter), and the symbol-bloat report over both linker maps (`tools/bloat.rs`) — on the shipping profile (immediate-abort + vendored crossterm).
 It exits non-zero with a summary if any step failed.
 Use Git Bash on Windows:
 
@@ -85,8 +85,18 @@ size -A target/x86_64-unknown-linux-gnu/release/wordle_tui
 bloaty target/x86_64-unknown-linux-gnu/release/wordle_tui
 ```
 
-**`cargo bloat` is a hint generator, never ground truth.**
-Two failure modes, both observed here: identical-code folding (`/OPT:ICF`, `--icf=all`) makes it attribute a folded body to an arbitrary, often-dead symbol name — that is how `supports_ansi` and its `env::var` kept appearing in reports of a binary that does not contain them; and the `--config` crossterm patch is not reliably applied under `cargo bloat`, so it frequently measures upstream crossterm instead.
+**Symbol attribution: `tools/bloat.rs` over the linker map.**
+BUILD.md's immediate-abort commands make the link also emit its symbol map (`/MAP:target/wordle_tui.map` on MSVC, `-Wl,-Map=target/wordle_tui-linux.map` on lld) — **without changing a byte of the binary** (verified: only the 6 link-timestamp bytes differ).
+
+```bash
+cargo run --example bloat
+```
+
+reads the freshest map (pass a path to pin one, `-n N` for the list length) and prints a by-crate table plus the top symbols per section, sized post-LTO/ICF on the exact shipping binary: MSVC sizes are consecutive-address deltas (ICF folds share an address and are listed together instead of misattributed), lld sizes are exact per-input-section.
+Crates come from the demangled names — under fat LTO every Rust symbol lands in one object, so object-based attribution is meaningless.
+This method found changes [#24–#26](#changelog).
+
+It replaces **`cargo bloat`**, which had two failure modes, both observed here: identical-code folding made it attribute a folded body to an arbitrary, often-dead symbol name — that is how `supports_ansi` and its `env::var` kept appearing in reports of a binary that does not contain them — and the `--config` crossterm patch was not reliably applied under it, so it frequently measured upstream crossterm instead.
 Cargo's *"patch … was not used in the crate graph"* warning is **not** a signal either way — it also fires on correct builds whenever the patched version equals the registry one; `tools/validate.sh` instead probes the built binary for upstream-crossterm markers (`NO_COLOR`/`COLORTERM`) and fails if they are present.
 Confirm any lead by string-probing the binary and by a measured rebuild.
 
@@ -129,6 +139,11 @@ Each row is explained in the section of the same number below.
 | | **D — Measured standalone** *(not points on either chain)* | | | |
 | 22 | `ui::center` via `saturating_sub`/`div_ceil` | −32 | — | — |
 | 23 | Panic hook: `exit(101)` instead of returning | 0 *(+80 `.text`)* | — | — |
+| | **E — Linker-map hunt** *(pinned `nightly-2026-08-25`; from the re-measured 64,296)* | | | |
+| 24 | Vendored crossterm: no `io::Error` message payloads | −6,580 | ≈ 0 | 57,716 |
+| 25 | Vendored crossterm: ASCII-only key case correction | −6,108 | 0 | 51,608 |
+| 26 | Vendored crossterm: millisecond poll clock | −534 | 0 | 51,074 |
+| 27 | `App` message in a fixed buffer | −176 | ≈ 0 | 50,898 |
 
 ### 1 — Base-26 word packing
 
@@ -345,6 +360,31 @@ If the hook returns, `panic = "abort"` calls `abort()`, which on Windows hands o
 It costs +80 B of `.text` and 0 in the `.exe`, and applies to the profiles that keep the hook at all.
 See [Panic handling](#panic-handling).
 
+### 24 — Vendored crossterm: no `io::Error` message payloads
+
+The first find of **linker-map attribution**: building with `-Clink-arg=/MAP:…` is byte-neutral (verified: the two binaries differ only in the 6 timestamp bytes any relink changes) and lists every post-LTO/ICF symbol of the exact shipping binary with its address — sizes fall out of consecutive-address deltas, folded symbols share an address.
+Unlike `cargo bloat` it cannot measure the wrong build, and folds are visible instead of misattributed.
+
+The map showed ~6.6 KB anchored by `io::Error::new(kind, "message")` in crossterm: a `&str` payload monomorphizes `From<&str> for Box<dyn Error>`, and the boxed `StringError`'s `Debug` vtable reaches `str::escape_debug`, whose printable-class/grapheme tables cost ~3.4 KB of `.rdata` alone.
+Four live sites patched (`ErrorKind` alone, no payload — nothing in the app reads error messages); details in [LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md) change 4.
+On Linux the same patch shrinks sections by ~430 B, but `.relro_padding` (page alignment, counted by `size -A`) grows back by almost exactly that: net −1 B across changes 24–27.
+
+### 25 — Vendored crossterm: ASCII-only key case correction
+
+Same map, next anchor: the Windows key parser's shift/capslock fix-up calls the full-unicode `to_lowercase()`/`to_uppercase()`, anchoring the case-mapping tables — ~5 KB of `.rdata` + ~1 KB of `.text`, the single largest non-blob `.rdata` cost.
+Patched to `to_ascii_*` ([LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md) change 5); only non-ASCII keyboard input behaves differently (passes through un-recased), unobservable in a game that accepts `is_ascii_alphabetic` only.
+
+### 26 — Vendored crossterm: millisecond poll clock
+
+`PollTimeout` stamped `Instant`, which on Windows is `QueryPerformanceCounter` behind a `Once`-cached frequency plus 128-bit `Duration` arithmetic — for a value that ends up as the millisecond argument of `WaitForMultipleObjects`.
+`GetTickCount64` (u64 milliseconds) replaces it on Windows; Unix keeps `Instant` ([LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md) change 6).
+
+### 27 — `App` message in a fixed buffer
+
+The footer message was the binary's only `String` writer; it is now a fixed `[u8; 48]` + length (`len == 0` = no message), dropping the `String::push`/`push_str` monomorphizations.
+Only −176 B: the map shows most of the `String`/`RawVec` machinery is *shared* with the stuck OS-error path below (`error_string` builds a `String`), so the app's usage was riding on already-paid code.
+Kept: the code is no worse, and it decouples the app from `String` should the stuck path ever fall.
+
 ## Rejected experiments
 
 Measured, then reverted.
@@ -372,6 +412,11 @@ Recorded so they are not retried.
   crossterm is at its floor ([#3](#3--crossterm-feature-floor)) — `events` is required for input, `windows` for raw mode/console, and crossterm has no `no_std` mode.
   On Windows, `events` pulls `mio`/`signal-hook`/`signal-hook-mio` only under `cfg(unix)`, so they are not compiled.
   And cargo *unions* features across the graph, so from our manifest we can only ever *add* a transitive dependency's features, never remove one crossterm's own edge requests — which is why the only lever that worked was `[patch]`-ing crossterm itself ([#13](#13--vendored-crossterm-ioctl-only-size), [#15](#15--vendored-crossterm-single-threaded-parking_lot-dropped)).
+- **The OS-error message subtree (~2.1 KB `.text`: `error_string`, `alloc::fmt::format`, `String::write_fmt`, `fmt::num`).**
+  std's `io::Error` registers a lazy OS-message provider (`from_raw_os_error`'s `FUNCTION`) the moment any `last_os_error()` exists in the binary — and std's own stdio write path creates them, so no crossterm patch can free it.
+  Likewise `decode_error_kind` (~640 B) is anchored by the `ErrorKind::Interrupted` retry loops inside std's `write_all`, not by crossterm's.
+- **`crossterm_winapi`'s `write_char_buffer` UTF-16 machinery (~700 B).**
+  `EncodeUtf16 → Vec` collect plus friends stay linked from the upstream crate; freeing them would mean vendoring `crossterm_winapi` too — noted, not done.
 - Everything else in `.text` is either ours (`main`, `ui::build_grid`, `app::submit`, `words::decode_word`) or genuinely-used std and crossterm — on Linux, notably the Unix input stack (`parse_event`, signal-hook, mio).
 
 ## Panic handling

@@ -72,10 +72,8 @@ impl WinApiPoll {
                 Ok(None)
             }
             WAIT_FAILED => Err(io::Error::last_os_error()),
-            _ => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "WaitForMultipleObjects returned unexpected result.",
-            )),
+            // LOCAL PATCH — see …LOCAL_PATCH.md: no message payload.
+            _ => Err(io::Error::from(io::ErrorKind::Other)),
         }
     }
 

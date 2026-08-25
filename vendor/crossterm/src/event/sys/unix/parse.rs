@@ -20,7 +20,9 @@ use super::super::super::InternalEvent;
 //
 
 fn could_not_parse_event_error() -> io::Error {
-    io::Error::new(io::ErrorKind::Other, "Could not parse an event.")
+    // LOCAL PATCH — see …LOCAL_PATCH.md: no message payload (a &str payload anchors
+    // Box<dyn Error> + its Debug/Display vtables + char::escape_debug's unicode tables).
+    io::Error::from(io::ErrorKind::Other)
 }
 
 pub(crate) fn parse_event(

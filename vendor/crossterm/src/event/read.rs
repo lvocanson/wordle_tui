@@ -52,10 +52,9 @@ impl InternalEventReader {
         let event_source = match self.source.as_mut() {
             Some(source) => source,
             None => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Failed to initialize input reader",
-                ))
+                // LOCAL PATCH — see …LOCAL_PATCH.md: no message payload (a &str payload anchors
+                // Box<dyn Error> + its Debug/Display vtables + char::escape_debug's unicode tables).
+                return Err(std::io::Error::from(std::io::ErrorKind::Other));
             }
         };
 

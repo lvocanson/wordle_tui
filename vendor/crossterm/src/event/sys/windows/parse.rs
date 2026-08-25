@@ -103,29 +103,13 @@ enum CharCase {
     UpperCase,
 }
 
+// LOCAL PATCH — see …LOCAL_PATCH.md: ASCII-only case correction. Upstream uses the full unicode
+// `to_lowercase`/`to_uppercase` iterators, anchoring the case-conversion tables; non-ASCII chars
+// now pass through in the case the keyboard layout produced.
 fn try_ensure_char_case(ch: char, desired_case: CharCase) -> char {
     match desired_case {
-        CharCase::LowerCase if ch.is_uppercase() => {
-            let mut iter = ch.to_lowercase();
-            // Unwrap is safe; iterator yields one or more chars.
-            let ch_lower = iter.next().unwrap();
-            if iter.next().is_none() {
-                ch_lower
-            } else {
-                ch
-            }
-        }
-        CharCase::UpperCase if ch.is_lowercase() => {
-            let mut iter = ch.to_uppercase();
-            // Unwrap is safe; iterator yields one or more chars.
-            let ch_upper = iter.next().unwrap();
-            if iter.next().is_none() {
-                ch_upper
-            } else {
-                ch
-            }
-        }
-        _ => ch,
+        CharCase::LowerCase => ch.to_ascii_lowercase(),
+        CharCase::UpperCase => ch.to_ascii_uppercase(),
     }
 }
 

@@ -30,3 +30,12 @@ crossterm_winapi = "0.9.1"
 [[example]]
 name = "stats"
 path = "tools/stats.rs"
+
+# Off-tree symbol-bloat reporter over the linker map (see tools/bloat.rs; replaces cargo-bloat).
+[[example]]
+name = "bloat"
+path = "tools/bloat.rs"
+
+# Tooling-only (examples); dev-dependencies never link into the game binary.
+[dev-dependencies]
+rustc-demangle = "0.1"

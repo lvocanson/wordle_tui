@@ -51,12 +51,14 @@ jobs:
             rustflags: >-
               -Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort
               -Clink-arg=/OPT:ICF -Clink-arg=/DEBUG:NONE
+              -Clink-arg=/MAP:target/wordle_tui.map
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             suffix: ''
             rustflags: >-
               -Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort
               -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none
+              -Clink-arg=-Wl,-Map=target/wordle_tui-linux.map
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

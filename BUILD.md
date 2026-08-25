@@ -43,10 +43,11 @@ cargo +nightly-2026-08-25 build --release --target x86_64-pc-windows-msvc
 **immediate-abort:**
 
 ```powershell
-$env:RUSTFLAGS = '-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clink-arg=/OPT:ICF -Clink-arg=/DEBUG:NONE'; cargo +nightly-2026-08-25 build --release --target x86_64-pc-windows-msvc --config .cargo/crossterm-patch.toml; Remove-Item Env:RUSTFLAGS
+$env:RUSTFLAGS = '-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clink-arg=/OPT:ICF -Clink-arg=/DEBUG:NONE -Clink-arg=/MAP:target/wordle_tui.map'; cargo +nightly-2026-08-25 build --release --target x86_64-pc-windows-msvc --config .cargo/crossterm-patch.toml; Remove-Item Env:RUSTFLAGS
 ```
 
 > `RUSTFLAGS` **overrides** the `[target]` block (it does not merge), so `/OPT:ICF` and `/DEBUG:NONE` are repeated in the immediate-abort line.
+> `/MAP:…` makes the link also emit its symbol map for `cargo run --example bloat` — it does not change a byte of the binary (see OPTIMIZATION.md "Symbol attribution").
 
 ---
 
@@ -72,11 +73,12 @@ RUSTFLAGS="-Zunstable-options -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -C
 **immediate-abort:**
 
 ```bash
-RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none" \
+RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none -Clink-arg=-Wl,-Map=target/wordle_tui-linux.map" \
   cargo +nightly-2026-08-25 build --release --target x86_64-unknown-linux-gnu --config .cargo/crossterm-patch.toml
 ```
 
 > `RUSTFLAGS` **overrides** the `[target]` block, so `--build-id=none` is repeated in every line.
+> `-Wl,-Map=…` emits the symbol map for `cargo run --example bloat`, byte-neutral like the MSVC `/MAP`.
 > Without a system `lld`, drop `-Clink-arg=-fuse-ld=lld -Clink-arg=-Wl,--icf=all` from the stable line (it falls back to `cargo build --release`, slightly larger).
 
 ---
