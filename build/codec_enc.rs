@@ -24,7 +24,13 @@ pub struct RangeEncoder {
 impl RangeEncoder {
     pub fn new() -> Self {
         // cache_size starts at 1 so the first shift emits one leading byte the decoder skips.
-        RangeEncoder { low: 0, range: 0xFFFF_FFFF, cache: 0, cache_size: 1, out: Vec::new() }
+        RangeEncoder {
+            low: 0,
+            range: 0xFFFF_FFFF,
+            cache: 0,
+            cache_size: 1,
+            out: Vec::new(),
+        }
     }
 
     fn shift_low(&mut self) {

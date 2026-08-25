@@ -65,11 +65,23 @@ fn run(out: &mut Stdout) -> io::Result<()> {
     let mut app = App::new();
     let mut size = terminal::size()?;
     let mut dirty = true;
-    let mut grid = ui::build_grid(size.0 as usize, size.1 as usize, &app.game, app.message.as_deref(), app.controls); // kept for hit-testing
+    let mut grid = ui::build_grid(
+        size.0 as usize,
+        size.1 as usize,
+        &app.game,
+        app.message.as_deref(),
+        app.controls,
+    ); // kept for hit-testing
 
     loop {
         if dirty {
-            grid = ui::build_grid(size.0 as usize, size.1 as usize, &app.game, app.message.as_deref(), app.controls);
+            grid = ui::build_grid(
+                size.0 as usize,
+                size.1 as usize,
+                &app.game,
+                app.message.as_deref(),
+                app.controls,
+            );
             ui::render(out, &grid)?;
             dirty = false;
         }

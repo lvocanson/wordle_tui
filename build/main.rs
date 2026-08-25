@@ -65,7 +65,6 @@ fn main() {
     let mut answers = read_words(&answers_txt).unwrap_or_else(|e| panic!("answer words: {e}"));
     let mut valid = read_words(&valid_txt).unwrap_or_else(|e| panic!("valid words: {e}"));
 
-    
     let word_len = word_length(answers.iter().chain(&valid).map(|w| w.len()))
         .unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(

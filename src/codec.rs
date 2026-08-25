@@ -36,7 +36,12 @@ pub struct RangeDecoder<'a> {
 
 impl<'a> RangeDecoder<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        let mut d = RangeDecoder { range: 0xFFFF_FFFF, code: 0, data, pos: 1 }; // skip leading byte
+        let mut d = RangeDecoder {
+            range: 0xFFFF_FFFF,
+            code: 0,
+            data,
+            pos: 1,
+        }; // skip leading byte
         for _ in 0..4 {
             let b = d.next();
             d.code = (d.code << 8) | b;

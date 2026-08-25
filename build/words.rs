@@ -94,7 +94,10 @@ pub fn word_length(lengths: impl Iterator<Item = usize>) -> Result<usize, WordsE
     let mut keys = by_len.keys().copied();
     match (keys.next(), keys.next()) {
         (Some(len), None) if len <= MAX_WORD_LEN => Ok(len),
-        (Some(len), None) => Err(WordsError::TooLong { len, max: MAX_WORD_LEN }),
+        (Some(len), None) => Err(WordsError::TooLong {
+            len,
+            max: MAX_WORD_LEN,
+        }),
         _ => Err(WordsError::MixedLengths(by_len)),
     }
 }
@@ -138,36 +141,54 @@ where
 
             (Some(ans), None) => {
                 self.next_answer = self.answers.next();
-                Some(WordleWord { word: ans, kind: WordKind::Answer })
+                Some(WordleWord {
+                    word: ans,
+                    kind: WordKind::Answer,
+                })
             }
 
             (None, Some(val)) => {
                 self.next_valid = self.valids.next();
-                Some(WordleWord { word: val, kind: WordKind::Valid })
+                Some(WordleWord {
+                    word: val,
+                    kind: WordKind::Valid,
+                })
             }
 
             (Some(ans), Some(val)) => match ans.cmp(&val) {
                 Ordering::Less => {
                     self.next_answer = self.answers.next();
                     self.next_valid = Some(val);
-                    Some(WordleWord { word: ans, kind: WordKind::Answer })
+                    Some(WordleWord {
+                        word: ans,
+                        kind: WordKind::Answer,
+                    })
                 }
                 Ordering::Equal => {
                     self.next_answer = self.answers.next();
                     self.next_valid = self.valids.next();
-                    Some(WordleWord { word: ans, kind: WordKind::Answer })
+                    Some(WordleWord {
+                        word: ans,
+                        kind: WordKind::Answer,
+                    })
                 }
                 Ordering::Greater => {
                     self.next_answer = Some(ans);
                     self.next_valid = self.valids.next();
-                    Some(WordleWord { word: val, kind: WordKind::Valid })
+                    Some(WordleWord {
+                        word: val,
+                        kind: WordKind::Valid,
+                    })
                 }
             },
         }
     }
 }
 
-pub fn merge_words<A, V>(answer_words: A, valid_words: V) -> MergedWordsIter<A::IntoIter, V::IntoIter>
+pub fn merge_words<A, V>(
+    answer_words: A,
+    valid_words: V,
+) -> MergedWordsIter<A::IntoIter, V::IntoIter>
 where
     A: IntoIterator<Item = LowercaseAsciiWord>,
     V: IntoIterator<Item = LowercaseAsciiWord>,
@@ -177,5 +198,10 @@ where
     let next_answer = answers.next();
     let next_valid = valids.next();
 
-    MergedWordsIter { answers, valids, next_answer, next_valid }
+    MergedWordsIter {
+        answers,
+        valids,
+        next_answer,
+        next_valid,
+    }
 }

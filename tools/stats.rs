@@ -61,11 +61,16 @@ fn print_compression() {
     }
     println!("{}", size_line("source", source, source));
     println!("{}", size_line("packed", packed, source));
-    println!("-> {:.2} B/word ({:.2} b/letter) - encoder order {ORDER}{}, inc {INC}, colour {}",
+    println!(
+        "-> {:.2} B/word ({:.2} b/letter) - encoder order {ORDER}{}, inc {INC}, colour {}",
         packed as f64 / WORD_COUNT as f64,
         (packed * 8) as f64 / (WORD_COUNT * WORD_LEN) as f64,
         if USE_POS { "+pos" } else { "" },
-        if USE_COLOR { format!("@{COLOR_POS}") } else { "global".to_string() },
+        if USE_COLOR {
+            format!("@{COLOR_POS}")
+        } else {
+            "global".to_string()
+        },
     );
 }
 
@@ -88,9 +93,14 @@ fn print_binary_size() {
     };
     // Show the path (relative to the crate when possible): both profiles produce a `wordle_tui.exe`,
     // so the bare file name would not say which one was measured.
-    let shown = path.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap_or(&path);
+    let shown = path
+        .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+        .unwrap_or(&path);
     println!("\n{}", shown.display());
-    println!("  {} B on disk (file-aligned)\n", commas(bytes.len() as u64));
+    println!(
+        "  {} B on disk (file-aligned)\n",
+        commas(bytes.len() as u64)
+    );
 
     #[cfg(windows)]
     let total = print_pe_sections(&bytes);
@@ -176,9 +186,14 @@ fn print_pe_sections(bytes: &[u8]) -> u64 {
 #[cfg(target_os = "linux")]
 fn print_elf_sections(bytes: &[u8], path: &Path) -> u64 {
     // ELF64 LE only: magic 0x7f'E''L''F', EI_CLASS == 2 (64-bit), EI_DATA == 1 (little-endian).
-    if bytes.get(..4) != Some(&b"\x7fELF"[..]) || bytes.get(4) != Some(&2) || bytes.get(5) != Some(&1)
+    if bytes.get(..4) != Some(&b"\x7fELF"[..])
+        || bytes.get(4) != Some(&2)
+        || bytes.get(5) != Some(&1)
     {
-        println!("  (not 64-bit little-endian ELF; use `size -A {}`)", path.display());
+        println!(
+            "  (not 64-bit little-endian ELF; use `size -A {}`)",
+            path.display()
+        );
         return bytes.len() as u64;
     }
     let shoff = u64le(bytes, 0x28) as usize; // e_shoff: section header table offset
@@ -190,7 +205,10 @@ fn print_elf_sections(bytes: &[u8], path: &Path) -> u64 {
     let strtab = u64le(bytes, shoff + shstrndx * shentsize + 24) as usize; // that section's sh_offset
     let name_at = |sh_name: u32| {
         let start = strtab + sh_name as usize;
-        let end = bytes[start..].iter().position(|&b| b == 0).map_or(bytes.len(), |n| start + n);
+        let end = bytes[start..]
+            .iter()
+            .position(|&b| b == 0)
+            .map_or(bytes.len(), |n| start + n);
         std::str::from_utf8(&bytes[start..end]).unwrap_or("?")
     };
 
@@ -242,7 +260,12 @@ fn size_line(label: &str, bytes: u64, total: u64) -> String {
     } else {
         String::new()
     };
-    row(label, &commas(bytes), &format!("{:.2}", bytes as f64 / 1024.0), &pct)
+    row(
+        label,
+        &commas(bytes),
+        &format!("{:.2}", bytes as f64 / 1024.0),
+        &pct,
+    )
 }
 
 /// Little-endian header readers, shared by the PE and ELF parsers.

@@ -1,8 +1,8 @@
 use std::io::Write;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::game::{Game, LetterState, Score, MAX_GUESSES};
 use crate::words::WORD_LEN;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 const CELL_W: usize = 7;
 const CELL_H: usize = 3;
@@ -127,7 +127,7 @@ fn gaps(n: usize, extra: usize) -> [usize; SECTION_COUNT] {
         return g;
     }
     let d = n - 1;
-    
+
     // Indexed rather than `iter_mut().take(d)`: the plain loop optimizes smaller here.
     #[allow(clippy::needless_range_loop)]
     for i in 0..d {
@@ -187,15 +187,15 @@ enum CellColor {
     Board(LetterState),
 }
 
-const COLOR_RESET: &[u8]      = b"\x1b[0m";
+const COLOR_RESET: &[u8] = b"\x1b[0m";
 const COLOR_WHITE_TEXT: &[u8] = b"\x1b[38;5;15m";
-const COLOR_RED_TEXT: &[u8]   = b"\x1b[38;5;1m";
-const COLOR_EMPTY: &[u8]      = b"\x1b[48;2;18;18;19m";
-const COLOR_DRAFT: &[u8]      = b"\x1b[48;2;18;18;19m";
-const COLOR_KEYBOARD: &[u8]   = b"\x1b[48;2;129;131;132m";
-const COLOR_CORRECT: &[u8]    = b"\x1b[48;2;83;141;78m";
-const COLOR_MISPLACED: &[u8]  = b"\x1b[48;2;181;159;59m";
-const COLOR_ABSENT: &[u8]     = b"\x1b[48;2;58;58;60m";
+const COLOR_RED_TEXT: &[u8] = b"\x1b[38;5;1m";
+const COLOR_EMPTY: &[u8] = b"\x1b[48;2;18;18;19m";
+const COLOR_DRAFT: &[u8] = b"\x1b[48;2;18;18;19m";
+const COLOR_KEYBOARD: &[u8] = b"\x1b[48;2;129;131;132m";
+const COLOR_CORRECT: &[u8] = b"\x1b[48;2;83;141;78m";
+const COLOR_MISPLACED: &[u8] = b"\x1b[48;2;181;159;59m";
+const COLOR_ABSENT: &[u8] = b"\x1b[48;2;58;58;60m";
 
 fn cell_color(c: CellColor) -> &'static [u8] {
     match c {
@@ -236,19 +236,22 @@ fn draw_title(grid: &mut Grid, x: usize, y: usize, w: usize) {
     grid.text(x + off, y, TITLE, COLOR_WHITE_TEXT);
 }
 
-fn draw_footer(grid: &mut Grid, message: Option<&str>, controls: &str, x: usize, y: usize, w: usize, h: usize) {
+fn draw_footer(
+    grid: &mut Grid,
+    message: Option<&str>,
+    controls: &str,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+) {
     let msg = message.unwrap_or("");
     // Center each line, and clip it to the band so an over-long message can't spill
     // past the right edge into neighbouring cells.
     let put = |grid: &mut Grid, row: usize, s: &str, fg: &'static [u8]| {
         let off = (w / 2).saturating_sub(s.len() / 2);
         let visible = s.len().min(w.saturating_sub(off));
-        grid.text(
-            x + off,
-            row,
-            &s.as_bytes()[..visible],
-            fg,
-        );
+        grid.text(x + off, row, &s.as_bytes()[..visible], fg);
     };
     if h >= FOOTER_H {
         put(grid, y, msg, COLOR_RED_TEXT);
@@ -272,7 +275,15 @@ fn draw_board(grid: &mut Grid, game: &Game, y: usize, w: usize, cell_h: usize, v
         let ry = y + word_idx * (cell_h + vgap);
         for cell_idx in 0..WORD_LEN {
             let cx = bx + cell_idx * (cell_w + hgap);
-            draw_cell(grid, cx, ry, cell_w, cell_h, guess.word[cell_idx], CellColor::Board(guess.result[cell_idx]));
+            draw_cell(
+                grid,
+                cx,
+                ry,
+                cell_w,
+                cell_h,
+                guess.word[cell_idx],
+                CellColor::Board(guess.result[cell_idx]),
+            );
         }
     }
 }
@@ -443,9 +454,7 @@ pub fn build_grid(w: usize, h: usize, game: &Game, message: Option<&str>, contro
             Section::Title => draw_title(&mut grid, 0, y, w),
             Section::Board => draw_board(&mut grid, game, y, w, cell_h, bgap),
             Section::Keyboard => draw_keyboard(&mut grid, game, y, w, kgap),
-            Section::Footer => {
-                draw_footer(&mut grid, message, controls, 0, y, w, footer_h)
-            }
+            Section::Footer => draw_footer(&mut grid, message, controls, 0, y, w, footer_h),
         }
     }
 

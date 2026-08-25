@@ -117,7 +117,12 @@ impl Iterator for Corpus {
     fn next(&mut self) -> Option<Self::Item> {
         self.left = self.left.checked_sub(1)?;
         let mut word = [0u8; WORD_LEN];
-        decode_word(&mut self.dec, &mut self.model, self.prev.as_ref().map(|w| &w[..]), &mut word);
+        decode_word(
+            &mut self.dec,
+            &mut self.model,
+            self.prev.as_ref().map(|w| &w[..]),
+            &mut word,
+        );
         let cc = codec::color_ctx(&word, USE_COLOR, COLOR_POS);
         let is_answer = decode_color(&mut self.dec, &mut self.model.color[cc]);
         self.prev = Some(word);
@@ -194,10 +199,16 @@ mod tests {
         let mut answers = 0;
         let mut prev: Option<[u8; WORD_LEN]> = None;
         for (n, (w, is_answer)) in Corpus::new().enumerate() {
-            assert!(w.iter().all(|&c| c < 26), "word {n} has a non-letter symbol");
+            assert!(
+                w.iter().all(|&c| c < 26),
+                "word {n} has a non-letter symbol"
+            );
             if let Some(p) = &prev {
                 let ordered = if DESCENDING { w < *p } else { w > *p };
-                assert!(ordered, "word {n} is not strictly ordered relative to the previous");
+                assert!(
+                    ordered,
+                    "word {n} is not strictly ordered relative to the previous"
+                );
             }
             if is_answer {
                 answers += 1;

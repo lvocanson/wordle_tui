@@ -99,7 +99,10 @@ impl Game {
     }
 
     pub fn phase(&self) -> Phase {
-        if self.draft_idx > 0 && self.guesses[self.draft_idx - 1].result == [LetterState::Submitted(Score::Correct); WORD_LEN] {
+        if self.draft_idx > 0
+            && self.guesses[self.draft_idx - 1].result
+                == [LetterState::Submitted(Score::Correct); WORD_LEN]
+        {
             Phase::Won
         } else if self.draft_idx >= MAX_GUESSES {
             Phase::Lost
@@ -226,7 +229,10 @@ mod tests {
         let mut game = Game::with_target(*b"crane");
         assert_eq!(play(&mut game, "crane"), Ok(()));
         assert_eq!(game.phase(), Phase::Won);
-        assert_eq!(game.guesses[0].result, [LetterState::Submitted(Score::Correct); WORD_LEN]);
+        assert_eq!(
+            game.guesses[0].result,
+            [LetterState::Submitted(Score::Correct); WORD_LEN]
+        );
     }
 
     #[test]

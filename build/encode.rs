@@ -85,7 +85,14 @@ pub type TaggedWord = (Vec<u8>, bool);
 // Encode one word given the previous word, mirroring decode_word in src/words.rs. `descending` is
 // the stored sort direction: it flips which side of the previous word bounds the first differing
 // character (the sort proves w[p] > prev[p] ascending / w[p] < prev[p] descending).
-fn encode_word(enc: &mut RangeEncoder, m: &mut Model, prev: Option<&[u8]>, w: &[u8], word_len: usize, descending: bool) {
+fn encode_word(
+    enc: &mut RangeEncoder,
+    m: &mut Model,
+    prev: Option<&[u8]>,
+    w: &[u8],
+    word_len: usize,
+    descending: bool,
+) {
     let p = match prev {
         Some(pv) => common_prefix(pv, w),
         None => 0,
@@ -99,12 +106,20 @@ fn encode_word(enc: &mut RangeEncoder, m: &mut Model, prev: Option<&[u8]>, w: &[
         let (lo, hi) = match prev {
             Some(pv) if i == p => {
                 let f = pv[p] as usize;
-                if descending { (0, f) } else { (f + 1, 26) }
+                if descending {
+                    (0, f)
+                } else {
+                    (f + 1, 26)
+                }
             }
             _ => (0, 26),
         };
         let sym = w[i] as usize;
-        enc.encode(m.char_cum(ctx, lo, sym), m.char_freq(ctx, sym), m.char_tot(ctx, lo, hi));
+        enc.encode(
+            m.char_cum(ctx, lo, sym),
+            m.char_freq(ctx, sym),
+            m.char_tot(ctx, lo, hi),
+        );
         m.update(ctx, sym);
     }
 }
@@ -122,7 +137,13 @@ fn ordered(corpus: &[TaggedWord], reverse_word: bool, descending: bool) -> Vec<T
             (k, *a)
         })
         .collect();
-    v.sort_by(|x, y| if descending { y.0.cmp(&x.0) } else { x.0.cmp(&y.0) });
+    v.sort_by(|x, y| {
+        if descending {
+            y.0.cmp(&x.0)
+        } else {
+            x.0.cmp(&y.0)
+        }
+    });
     v
 }
 
@@ -192,7 +213,15 @@ pub fn best_model(corpus: &[TaggedWord], word_len: usize) -> Best {
                     }
                     for inc in 1..=MAX_INC {
                         for (use_color, color_pos) in color_schemes.clone() {
-                            let scheme = Scheme { order, use_pos, inc, reverse_word, descending, use_color, color_pos };
+                            let scheme = Scheme {
+                                order,
+                                use_pos,
+                                inc,
+                                reverse_word,
+                                descending,
+                                use_color,
+                                color_pos,
+                            };
                             let blob = encode_corpus(&ord, word_len, scheme);
                             if best.as_ref().is_none_or(|b| blob.len() < b.blob.len()) {
                                 best = Some(Best { scheme, blob });
