@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  checks:
+    name: checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      # fmt is platform-independent; once is enough.
+      - name: rustfmt
+        if: runner.os == 'Linux'
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy -- -D warnings
+      - name: tests
+        run: cargo test
+
+  # Builds the shipping profile (immediate-abort + vendored crossterm, see BUILD.md) and publishes
+  # the size report from tools/stats.rs in the job summary. The section total printed there is the
+  # number OPTIMIZATION.md tracks; the job itself never fails on size — it makes drift visible.
+  size:
+    name: size (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            suffix: .exe
+            # RUSTFLAGS overrides the [target] block in .cargo/config.toml (no merge),
+            # so the link args are repeated here — same lines as BUILD.md.
+            rustflags: >-
+              -Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort
+              -Clink-arg=/OPT:ICF -Clink-arg=/DEBUG:NONE
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            suffix: ''
+            rustflags: >-
+              -Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort
+              -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install nightly + rust-src (build-std)
+        run: rustup toolchain install nightly --profile minimal --component rust-src
+      - name: Build — immediate-abort + vendored crossterm
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo +nightly build --release --target ${{ matrix.target }} --config .cargo/crossterm-patch.toml
+      - name: Size report
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.target }}/release/wordle_tui${{ matrix.suffix }}"
+          cargo run --example stats -- "$BIN" | tee stats.txt
+          {
+            echo "### ${{ matrix.target }} — immediate-abort + vendored crossterm"
+            echo '```'
+            cat stats.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
