@@ -7,11 +7,14 @@ Three profiles, each with **one command per platform that produces the smallest 
   The recommended build.
 - **immediate-abort** — nightly; most aggressive (every panic → bare abort).
 
-The `build-std` and `immediate-abort` profiles need, once:
+The `build-std` and `immediate-abort` profiles use a **pinned** nightly (`nightly-2026-08-25`, same pin as `tools/validate.sh` and CI): binary sizes are only comparable at equal rustc, so the measured numbers in OPTIMIZATION.md are tied to this toolchain.
+Install it once:
 
 ```
-rustup toolchain install nightly --component rust-src
+rustup toolchain install nightly-2026-08-25 --profile minimal --component rust-src
 ```
+
+To bump the pin, update it here, in `tools/validate.sh` and in `.github/workflows/ci.yml`, then re-measure the reference totals.
 
 ### Vendored crossterm (opt-in, size)
 
@@ -34,13 +37,13 @@ cargo build --release
 **build-std:**
 
 ```powershell
-cargo +nightly build --release --target x86_64-pc-windows-msvc
+cargo +nightly-2026-08-25 build --release --target x86_64-pc-windows-msvc
 ```
 
 **immediate-abort:**
 
 ```powershell
-$env:RUSTFLAGS = '-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clink-arg=/OPT:ICF -Clink-arg=/DEBUG:NONE'; cargo +nightly build --release --target x86_64-pc-windows-msvc --config .cargo/crossterm-patch.toml; Remove-Item Env:RUSTFLAGS
+$env:RUSTFLAGS = '-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clink-arg=/OPT:ICF -Clink-arg=/DEBUG:NONE'; cargo +nightly-2026-08-25 build --release --target x86_64-pc-windows-msvc --config .cargo/crossterm-patch.toml; Remove-Item Env:RUSTFLAGS
 ```
 
 > `RUSTFLAGS` **overrides** the `[target]` block (it does not merge), so `/OPT:ICF` and `/DEBUG:NONE` are repeated in the immediate-abort line.
@@ -63,14 +66,14 @@ RUSTFLAGS="-Clink-arg=-fuse-ld=lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--bui
 
 ```bash
 RUSTFLAGS="-Zunstable-options -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none" \
-  cargo +nightly build --release --target x86_64-unknown-linux-gnu
+  cargo +nightly-2026-08-25 build --release --target x86_64-unknown-linux-gnu
 ```
 
 **immediate-abort:**
 
 ```bash
 RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none" \
-  cargo +nightly build --release --target x86_64-unknown-linux-gnu --config .cargo/crossterm-patch.toml
+  cargo +nightly-2026-08-25 build --release --target x86_64-unknown-linux-gnu --config .cargo/crossterm-patch.toml
 ```
 
 > `RUSTFLAGS` **overrides** the `[target]` block, so `--build-id=none` is repeated in every line.
@@ -85,7 +88,7 @@ Install the target once **on each toolchain you build with** — the nightly pro
 
 ```bash
 rustup target add x86_64-unknown-linux-musl                     # stable profile
-rustup target add --toolchain nightly x86_64-unknown-linux-musl # build-std / immediate-abort
+rustup target add --toolchain nightly-2026-08-25 x86_64-unknown-linux-musl # build-std / immediate-abort
 ```
 
 Output: `target/x86_64-unknown-linux-musl/release/wordle_tui`.
@@ -101,12 +104,12 @@ RUSTFLAGS="-Clink-arg=-fuse-ld=lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--bui
 
 ```bash
 RUSTFLAGS="-Zunstable-options -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none" \
-  cargo +nightly build --release --target x86_64-unknown-linux-musl
+  cargo +nightly-2026-08-25 build --release --target x86_64-unknown-linux-musl
 ```
 
 **immediate-abort:**
 
 ```bash
 RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none" \
-  cargo +nightly build --release --target x86_64-unknown-linux-musl --config .cargo/crossterm-patch.toml
+  cargo +nightly-2026-08-25 build --release --target x86_64-unknown-linux-musl --config .cargo/crossterm-patch.toml
 ```

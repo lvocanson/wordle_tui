@@ -18,22 +18,22 @@ That fell at change [#2](#changelog); the work continued from there.
 | Baseline — first crossterm+ratatui TUI | 396,288 | — | — |
 | Stable — no prerequisites, cross-platform | 214,016 (−46.0%) | 418,184 | 505,872 |
 | `build-std` — nightly, std without `backtrace`; terminal still restored on panic | 117,248 (−70.4%) | 184,760 | 279,568 |
-| `immediate-abort` — nightly, most aggressive; terminal **not** restored on panic | **64,297** (−83.8%) | 85,703 | 148,784 |
+| `immediate-abort` — nightly, most aggressive; terminal **not** restored on panic | **64,296** (−83.8%) | 81,600 | 148,784 |
 
 Caveats on that table, all of them about *when* a number was taken:
 
 - The **stable** and **build-std** rows are on-disk sizes measured before the recent data-layer and renderer work; they were not re-measured.
-  The **immediate-abort** Windows and Linux-glibc figures are un-padded section totals from the current source (see below for why the two metrics differ); the musl figure is older.
-- The Linux figure predates changes [#19–#21](#changelog), which were measured on Windows only.
+  The **immediate-abort** Windows and Linux-glibc figures are un-padded section totals from the current source, re-measured 2026-08-25 on the pinned toolchain (see below for why the two metrics differ); the musl figure is older.
 - Windows and Linux numbers are **not** comparable to each other: different linker, CRT and section layout, and glibc offloads libc to the system while the Windows `.exe` and musl do not.
   To compare platforms, re-measure both under the same lever.
-  Linux currently runs ~18 KB heavier than Windows, almost all of it the `.eh_frame` unwind tables (see [Stuck costs](#stuck-costs)).
+  Linux currently runs ~17 KB heavier than Windows, most of it the `.eh_frame` unwind tables (see [Stuck costs](#stuck-costs)).
 
 The embedded corpus accounts for 14,283 B — 22% of the current Windows binary.
 
 ## How sizes are measured
 
 Build with a profile from [BUILD.md](BUILD.md), then measure with `tools/stats.rs`.
+Totals are only comparable at equal rustc — a toolchain bump alone moved the Windows total by tens of bytes — so the measurement toolchain is **pinned** (`nightly-2026-08-25`, shared by BUILD.md, `tools/validate.sh` and CI); bump it deliberately and re-measure the reference totals when you do.
 The tool only *measures* — it never builds, so build first:
 
 ```bash
@@ -48,8 +48,8 @@ cargo run --example stats -- target/x86_64-pc-windows-msvc/release/wordle_tui.ex
 ```
 
 It prints two reports: the **compression report** (word counts, packed size, B/word, and the model constants the build chose) and the **binary report** — the on-disk size plus every section's un-padded size and their total.
-Sections are parsed directly: PE `VirtualSize` on Windows, ELF `sh_size` on Linux, where the per-section figures and the total match binutils `size -A` exactly.
-On other platforms only the on-disk size is available.
+The format is sniffed from the file itself — PE `VirtualSize` or ELF `sh_size` (where the per-section figures and the total match binutils `size -A` exactly) — so either platform's binary can be measured from either host.
+Each run also records its section sizes in a `.sections` sidecar next to the measured binary and prints the per-section delta against the previous run of that same binary, and it flags any zero-initialized data (`.bss`-like bytes that sit in the total but ship no file bytes — currently zero).
 
 > **Compare the section total, not the file on disk.**
 > PE pads sections to 512 B and ELF to page alignment, so a genuine saving of a few dozen bytes usually shows as 0 on disk — and occasionally as a −512 cliff that credits one change with the padding several changes filled.
@@ -60,7 +60,8 @@ On other platforms only the on-disk size is available.
 The build script runs before linking and cannot see the final binary, which is why this is a post-build tool rather than a `cargo:warning`.
 
 **Full validation run.**
-`tools/validate.sh` does everything in one invocation — tests, the Windows build and its size, the Linux build and size through WSL, and `cargo bloat` — on the shipping profile (immediate-abort + vendored crossterm).
+`tools/validate.sh` does everything in one invocation — tests, the Windows build and its size, the Linux build and size through WSL (both measured with the same `stats.rs` reporter), and `cargo bloat` — on the shipping profile (immediate-abort + vendored crossterm).
+It exits non-zero with a summary if any step failed.
 Use Git Bash on Windows:
 
 ```bash
@@ -85,7 +86,8 @@ bloaty target/x86_64-unknown-linux-gnu/release/wordle_tui
 ```
 
 **`cargo bloat` is a hint generator, never ground truth.**
-Two failure modes, both observed here: identical-code folding (`/OPT:ICF`, `--icf=all`) makes it attribute a folded body to an arbitrary, often-dead symbol name — that is how `supports_ansi` and its `env::var` kept appearing in reports of a binary that does not contain them; and the `--config` crossterm patch is not reliably applied under `cargo bloat` (watch for *"patch … was not used in the crate graph"*), so it frequently measures upstream crossterm instead.
+Two failure modes, both observed here: identical-code folding (`/OPT:ICF`, `--icf=all`) makes it attribute a folded body to an arbitrary, often-dead symbol name — that is how `supports_ansi` and its `env::var` kept appearing in reports of a binary that does not contain them; and the `--config` crossterm patch is not reliably applied under `cargo bloat`, so it frequently measures upstream crossterm instead.
+Cargo's *"patch … was not used in the crate graph"* warning is **not** a signal either way — it also fires on correct builds whenever the patched version equals the registry one; `tools/validate.sh` instead probes the built binary for upstream-crossterm markers (`NO_COLOR`/`COLORTERM`) and fails if they are present.
 Confirm any lead by string-probing the binary and by a measured rebuild.
 
 ## Changelog

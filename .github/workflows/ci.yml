@@ -9,6 +9,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+env:
+  # Pinned measurement toolchain — totals are only comparable at equal rustc. Same pin as
+  # tools/validate.sh and BUILD.md; bump deliberately and re-measure the reference totals.
+  NIGHTLY: nightly-2026-08-25
+
 jobs:
   checks:
     name: checks (${{ matrix.os }})
@@ -58,12 +63,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - name: Install nightly + rust-src (build-std)
-        run: rustup toolchain install nightly --profile minimal --component rust-src
+      - name: Install pinned nightly + rust-src (build-std)
+        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal --component rust-src
       - name: Build — immediate-abort + vendored crossterm
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
-        run: cargo +nightly build --release --target ${{ matrix.target }} --config .cargo/crossterm-patch.toml
+        run: cargo +${{ env.NIGHTLY }} build --release --target ${{ matrix.target }} --config .cargo/crossterm-patch.toml
       - name: Size report
         shell: bash
         run: |
