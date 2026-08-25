@@ -1,3 +1,9 @@
+// LOCAL PATCH — see …LOCAL_PATCH.md: the parsers this reduced event set no longer reaches
+// (function/navigation keys, the kitty protocol, cursor-position and device-attribute replies,
+// rxvt mouse) are left in place rather than deleted, so a re-vendor stays a small diff. Being
+// unreferenced they contribute nothing to the binary; this silences their dead-code warnings.
+#![allow(dead_code)]
+
 use std::io;
 
 use crate::event::{
@@ -33,6 +39,12 @@ pub(crate) fn parse_event(
         return Ok(None);
     }
 
+    // LOCAL PATCH — see …LOCAL_PATCH.md: only the events the game consumes are produced —
+    // Esc, Enter, Backspace, Ctrl+letter and printable characters. Everything else (SS3 and
+    // Alt+key sequences, Tab, the other control codes) is dropped with `Err`, which the caller
+    // turns into "clear the buffer and carry on", exactly as it already does for a sequence
+    // upstream cannot parse. Whole sequences are always consumed before being dropped, so their
+    // tail can never resurface as fake keystrokes.
     match buffer[0] {
         b'\x1B' => {
             if buffer.len() == 1 {
@@ -44,77 +56,25 @@ pub(crate) fn parse_event(
                 }
             } else {
                 match buffer[1] {
-                    b'O' => {
-                        if buffer.len() == 2 {
-                            Ok(None)
-                        } else {
-                            match buffer[2] {
-                                b'D' => {
-                                    Ok(Some(InternalEvent::Event(Event::Key(KeyCode::Left.into()))))
-                                }
-                                b'C' => Ok(Some(InternalEvent::Event(Event::Key(
-                                    KeyCode::Right.into(),
-                                )))),
-                                b'A' => {
-                                    Ok(Some(InternalEvent::Event(Event::Key(KeyCode::Up.into()))))
-                                }
-                                b'B' => {
-                                    Ok(Some(InternalEvent::Event(Event::Key(KeyCode::Down.into()))))
-                                }
-                                b'H' => {
-                                    Ok(Some(InternalEvent::Event(Event::Key(KeyCode::Home.into()))))
-                                }
-                                b'F' => {
-                                    Ok(Some(InternalEvent::Event(Event::Key(KeyCode::End.into()))))
-                                }
-                                // F1-F4
-                                val @ b'P'..=b'S' => Ok(Some(InternalEvent::Event(Event::Key(
-                                    KeyCode::F(1 + val - b'P').into(),
-                                )))),
-                                _ => Err(could_not_parse_event_error()),
-                            }
-                        }
-                    }
                     b'[' => parse_csi(buffer),
                     b'\x1B' => Ok(Some(InternalEvent::Event(Event::Key(KeyCode::Esc.into())))),
-                    _ => parse_event(&buffer[1..], input_available).map(|event_option| {
-                        event_option.map(|event| {
-                            if let InternalEvent::Event(Event::Key(key_event)) = event {
-                                let mut alt_key_event = key_event;
-                                alt_key_event.modifiers |= KeyModifiers::ALT;
-                                InternalEvent::Event(Event::Key(alt_key_event))
-                            } else {
-                                event
-                            }
-                        })
-                    }),
+                    // SS3 (ESC O x) is always three bytes; wait for the third, then drop it.
+                    b'O' if buffer.len() == 2 => Ok(None),
+                    _ => Err(could_not_parse_event_error()),
                 }
             }
         }
         b'\r' => Ok(Some(InternalEvent::Event(Event::Key(
             KeyCode::Enter.into(),
         )))),
-        // Issue #371: \n = 0xA, which is also the keycode for Ctrl+J. The only reason we get
-        // newlines as input is because the terminal converts \r into \n for us. When we
-        // enter raw mode, we disable that, so \n no longer has any meaning - it's better to
-        // use Ctrl+J. Waiting to handle it here means it gets picked up later
-        b'\n' if !crate::terminal::sys::is_raw_mode_enabled() => Ok(Some(InternalEvent::Event(
-            Event::Key(KeyCode::Enter.into()),
-        ))),
-        b'\t' => Ok(Some(InternalEvent::Event(Event::Key(KeyCode::Tab.into())))),
         b'\x7F' => Ok(Some(InternalEvent::Event(Event::Key(
             KeyCode::Backspace.into(),
         )))),
+        // Ctrl+letter, the range that carries Ctrl+C. \n (Ctrl+J) and \t (Ctrl+I) land here too:
+        // upstream maps them to Enter/Tab, but only outside raw mode for \n, and this app is
+        // always in raw mode.
         c @ b'\x01'..=b'\x1A' => Ok(Some(InternalEvent::Event(Event::Key(KeyEvent::new(
             KeyCode::Char((c - 0x1 + b'a') as char),
-            KeyModifiers::CONTROL,
-        ))))),
-        c @ b'\x1C'..=b'\x1F' => Ok(Some(InternalEvent::Event(Event::Key(KeyEvent::new(
-            KeyCode::Char((c - 0x1C + b'4') as char),
-            KeyModifiers::CONTROL,
-        ))))),
-        b'\0' => Ok(Some(InternalEvent::Event(Event::Key(KeyEvent::new(
-            KeyCode::Char(' '),
             KeyModifiers::CONTROL,
         ))))),
         _ => parse_utf8_char(buffer).map(|maybe_char| {
@@ -129,13 +89,25 @@ pub(crate) fn parse_event(
 
 // converts KeyCode to KeyEvent (adds shift modifier in case of uppercase characters)
 fn char_code_to_event(code: KeyCode) -> KeyEvent {
+    // LOCAL PATCH — see …LOCAL_PATCH.md: ASCII-only uppercase test (`char::is_uppercase` anchors
+    // the unicode case tables). A non-ASCII capital now arrives without the SHIFT modifier; the
+    // character itself is unchanged, and this game reads neither.
     let modifiers = match code {
-        KeyCode::Char(c) if c.is_uppercase() => KeyModifiers::SHIFT,
+        KeyCode::Char(c) if c.is_ascii_uppercase() => KeyModifiers::SHIFT,
         _ => KeyModifiers::empty(),
     };
     KeyEvent::new(code, modifiers)
 }
 
+// LOCAL PATCH — see …LOCAL_PATCH.md: of the CSI sequences, only the two mouse encodings the
+// terminal can send us are decoded. Every other one — arrows, F-keys, Home/End/PageUp/PageDown,
+// Insert/Delete, BackTab, focus in/out, the kitty protocol, cursor-position and device-attribute
+// replies, bracketed paste — is dropped.
+//
+// Dropping still has to *frame* the sequence: a CSI sequence runs until its first final byte
+// (0x40..=0x7E), so incomplete ones keep returning `Ok(None)`. Erroring out early would clear the
+// buffer mid-sequence and the tail would be re-parsed as ordinary keystrokes — an arrow key would
+// type letters into the game.
 pub(crate) fn parse_csi(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
     assert!(buffer.starts_with(b"\x1B[")); // ESC [
 
@@ -143,76 +115,20 @@ pub(crate) fn parse_csi(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
         return Ok(None);
     }
 
-    let input_event = match buffer[2] {
-        b'[' => {
-            if buffer.len() == 3 {
-                None
+    match buffer[2] {
+        b'M' => parse_csi_normal_mouse(buffer),
+        b'<' => parse_csi_sgr_mouse(buffer),
+        // `ESC [ [ x` (Linux console F1-F5): '[' is itself a final byte, so this one needs its
+        // own arm or the rule below would drop it a byte early and leak the 'x'.
+        b'[' if buffer.len() == 3 => Ok(None),
+        _ => {
+            if (0x40..=0x7E).contains(&buffer[buffer.len() - 1]) {
+                Err(could_not_parse_event_error())
             } else {
-                match buffer[3] {
-                    // NOTE (@imdaveho): cannot find when this occurs;
-                    // having another '[' after ESC[ not a likely scenario
-                    val @ b'A'..=b'E' => Some(Event::Key(KeyCode::F(1 + val - b'A').into())),
-                    _ => return Err(could_not_parse_event_error()),
-                }
+                Ok(None)
             }
         }
-        b'D' => Some(Event::Key(KeyCode::Left.into())),
-        b'C' => Some(Event::Key(KeyCode::Right.into())),
-        b'A' => Some(Event::Key(KeyCode::Up.into())),
-        b'B' => Some(Event::Key(KeyCode::Down.into())),
-        b'H' => Some(Event::Key(KeyCode::Home.into())),
-        b'F' => Some(Event::Key(KeyCode::End.into())),
-        b'Z' => Some(Event::Key(KeyEvent::new_with_kind(
-            KeyCode::BackTab,
-            KeyModifiers::SHIFT,
-            KeyEventKind::Press,
-        ))),
-        b'M' => return parse_csi_normal_mouse(buffer),
-        b'<' => return parse_csi_sgr_mouse(buffer),
-        b'I' => Some(Event::FocusGained),
-        b'O' => Some(Event::FocusLost),
-        b';' => return parse_csi_modifier_key_code(buffer),
-        // P, Q, and S for compatibility with Kitty keyboard protocol,
-        // as the 1 in 'CSI 1 P' etc. must be omitted if there are no
-        // modifiers pressed:
-        // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#legacy-functional-keys
-        b'P' => Some(Event::Key(KeyCode::F(1).into())),
-        b'Q' => Some(Event::Key(KeyCode::F(2).into())),
-        b'S' => Some(Event::Key(KeyCode::F(4).into())),
-        b'?' => match buffer[buffer.len() - 1] {
-            b'u' => return parse_csi_keyboard_enhancement_flags(buffer),
-            b'c' => return parse_csi_primary_device_attributes(buffer),
-            _ => None,
-        },
-        b'0'..=b'9' => {
-            // Numbered escape code.
-            if buffer.len() == 3 {
-                None
-            } else {
-                // The final byte of a CSI sequence can be in the range 64-126, so
-                // let's keep reading anything else.
-                let last_byte = buffer[buffer.len() - 1];
-                if !(64..=126).contains(&last_byte) {
-                    None
-                } else {
-                    #[cfg(feature = "bracketed-paste")]
-                    if buffer.starts_with(b"\x1B[200~") {
-                        return parse_csi_bracketed_paste(buffer);
-                    }
-                    match last_byte {
-                        b'M' => return parse_csi_rxvt_mouse(buffer),
-                        b'~' => return parse_csi_special_key_code(buffer),
-                        b'u' => return parse_csi_u_encoded_key_code(buffer),
-                        b'R' => return parse_csi_cursor_position(buffer),
-                        _ => return parse_csi_modifier_key_code(buffer),
-                    }
-                }
-            }
-        }
-        _ => return Err(could_not_parse_event_error()),
-    };
-
-    Ok(input_event.map(InternalEvent::Event))
+    }
 }
 
 pub(crate) fn next_parsed<T>(iter: &mut dyn Iterator<Item = &str>) -> io::Result<T>
@@ -689,6 +605,45 @@ pub(crate) fn parse_csi_rxvt_mouse(buffer: &[u8]) -> io::Result<Option<InternalE
     }))))
 }
 
+// LOCAL PATCH — see …LOCAL_PATCH.md: both mouse decoders below keep only a left-button press;
+// releases, drags, motion, scrolling and the other two buttons are dropped, as are the mouse
+// modifier bits (the game reads none of them).
+
+/// A left-button press that is not a drag: the two button-number fields and the drag bit all
+/// clear (see `parse_cb` for the full Cb bit layout).
+fn is_left_press(cb: u8) -> bool {
+    cb & 0b1110_0011 == 0
+}
+
+fn left_press_at(column: u16, row: u16) -> InternalEvent {
+    InternalEvent::Event(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::empty(),
+    }))
+}
+
+/// One `;`-separated decimal parameter, read straight from the bytes: `str::parse` would pull in
+/// the whole `FromStr` machinery for three small numbers.
+fn decimal(param: Option<&[u8]>) -> io::Result<u16> {
+    let bytes = param.ok_or_else(could_not_parse_event_error)?;
+    if bytes.is_empty() {
+        return Err(could_not_parse_event_error());
+    }
+    let mut n: u16 = 0;
+    for &b in bytes {
+        let digit = b.wrapping_sub(b'0');
+        if digit > 9 {
+            return Err(could_not_parse_event_error());
+        }
+        // Wrapping, like the coordinate arithmetic below: a bogus parameter yields a nonsense
+        // position, which hit-testing rejects. It cannot panic.
+        n = n.wrapping_mul(10).wrapping_add(digit as u16);
+    }
+    Ok(n)
+}
+
 pub(crate) fn parse_csi_normal_mouse(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
     // Normal mouse encoding: ESC [ M CB Cx Cy (6 characters only).
 
@@ -698,10 +653,9 @@ pub(crate) fn parse_csi_normal_mouse(buffer: &[u8]) -> io::Result<Option<Interna
         return Ok(None);
     }
 
-    let cb = buffer[3]
-        .checked_sub(32)
-        .ok_or_else(could_not_parse_event_error)?;
-    let (kind, modifiers) = parse_cb(cb)?;
+    if !is_left_press(buffer[3].wrapping_sub(32)) {
+        return Err(could_not_parse_event_error());
+    }
 
     // See http://www.xfree86.org/current/ctlseqs.html#Mouse%20Tracking
     // The upper left character position on the terminal is denoted as 1,1.
@@ -709,12 +663,7 @@ pub(crate) fn parse_csi_normal_mouse(buffer: &[u8]) -> io::Result<Option<Interna
     let cx = u16::from(buffer[4].saturating_sub(32)) - 1;
     let cy = u16::from(buffer[5].saturating_sub(32)) - 1;
 
-    Ok(Some(InternalEvent::Event(Event::Mouse(MouseEvent {
-        kind,
-        column: cx,
-        row: cy,
-        modifiers,
-    }))))
+    Ok(Some(left_press_at(cx, cy)))
 }
 
 pub(crate) fn parse_csi_sgr_mouse(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
@@ -722,44 +671,29 @@ pub(crate) fn parse_csi_sgr_mouse(buffer: &[u8]) -> io::Result<Option<InternalEv
 
     assert!(buffer.starts_with(b"\x1B[<")); // ESC [ <
 
-    if !buffer.ends_with(b"m") && !buffer.ends_with(b"M") {
-        return Ok(None);
+    // SGR ends with an uppercase M for a press and a lowercase m for a release; anything else
+    // means the sequence is still incomplete.
+    let last = match buffer.last() {
+        Some(&b @ (b'm' | b'M')) => b,
+        _ => return Ok(None),
+    };
+
+    let mut params = buffer[3..buffer.len() - 1].split(|&b| b == b';');
+    let cb = decimal(params.next())?;
+    let cx = decimal(params.next())?;
+    let cy = decimal(params.next())?;
+
+    if last != b'M' || cb > u16::from(u8::MAX) || !is_left_press(cb as u8) {
+        return Err(could_not_parse_event_error());
     }
-
-    let s = std::str::from_utf8(&buffer[3..buffer.len() - 1])
-        .map_err(|_| could_not_parse_event_error())?;
-    let mut split = s.split(';');
-
-    let cb = next_parsed::<u8>(&mut split)?;
-    let (kind, modifiers) = parse_cb(cb)?;
 
     // See http://www.xfree86.org/current/ctlseqs.html#Mouse%20Tracking
     // The upper left character position on the terminal is denoted as 1,1.
     // Subtract 1 to keep it synced with cursor
-    let cx = next_parsed::<u16>(&mut split)? - 1;
-    let cy = next_parsed::<u16>(&mut split)? - 1;
-
-    // When button 3 in Cb is used to represent mouse release, you can't tell which button was
-    // released. SGR mode solves this by having the sequence end with a lowercase m if it's a
-    // button release and an uppercase M if it's a button press.
-    //
-    // We've already checked that the last character is a lowercase or uppercase M at the start of
-    // this function, so we just need one if.
-    let kind = if buffer.last() == Some(&b'm') {
-        match kind {
-            MouseEventKind::Down(button) => MouseEventKind::Up(button),
-            other => other,
-        }
-    } else {
-        kind
-    };
-
-    Ok(Some(InternalEvent::Event(Event::Mouse(MouseEvent {
-        kind,
-        column: cx,
-        row: cy,
-        modifiers,
-    }))))
+    Ok(Some(left_press_at(
+        cx.wrapping_sub(1),
+        cy.wrapping_sub(1),
+    )))
 }
 
 /// Cb is the byte of a mouse input that contains the button being used, the key modifiers being

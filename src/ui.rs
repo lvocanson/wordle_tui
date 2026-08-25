@@ -267,6 +267,7 @@ fn draw_footer(
 
 // Vertical geometry (cell height `cell_h`, row gap `vgap`, y position) comes from the
 // caller's budget; columns follow the shared `col_budget` (interior > gaps > center).
+#[inline(never)]
 fn draw_board(grid: &mut Grid, game: &Game, y: usize, w: usize, cell_h: usize, vgap: usize) {
     let (cell_w, hgap, bx) = col_budget(w, WORD_LEN, CELL_W);
 
@@ -310,6 +311,7 @@ fn draw_keys(
     }
 }
 
+#[inline(never)]
 fn draw_keyboard(grid: &mut Grid, game: &Game, y: usize, w: usize, vgap: usize) {
     let (key_w, hgap, _) = col_budget(w, KB_COLS, KEY_W);
 

@@ -19,7 +19,6 @@ use crate::event::{
 pub(crate) struct WindowsEventSource {
     console: Console,
     poll: WinApiPoll,
-    surrogate_buffer: Option<u16>,
     mouse_buttons_pressed: MouseButtonsPressed,
 }
 
@@ -34,7 +33,6 @@ impl WindowsEventSource {
             #[cfg(feature = "event-stream")]
             poll: WinApiPoll::new()?,
 
-            surrogate_buffer: None,
             mouse_buttons_pressed: MouseButtonsPressed::default(),
         })
     }
@@ -48,17 +46,15 @@ impl EventSource for WindowsEventSource {
             if let Some(event_ready) = self.poll.poll(poll_timeout.leftover())? {
                 let number = self.console.number_of_console_input_events()?;
                 if event_ready && number != 0 {
+                    // LOCAL PATCH — see …LOCAL_PATCH.md: no surrogate pairing, left-button-only
+                    // mouse tracking, and no FocusGained/FocusLost events (the app ignores them).
                     let event = match self.console.read_single_input_event()? {
-                        InputRecord::KeyEvent(record) => {
-                            handle_key_event(record, &mut self.surrogate_buffer)
-                        }
+                        InputRecord::KeyEvent(record) => handle_key_event(record),
                         InputRecord::MouseEvent(record) => {
                             let mouse_event =
                                 handle_mouse_event(record, &self.mouse_buttons_pressed);
                             self.mouse_buttons_pressed = MouseButtonsPressed {
                                 left: record.button_state.left_button(),
-                                right: record.button_state.right_button(),
-                                middle: record.button_state.middle_button(),
                             };
 
                             mouse_event
@@ -69,14 +65,6 @@ impl EventSource for WindowsEventSource {
                                 (record.size.x as i32 + 1) as u16,
                                 (record.size.y as i32 + 1) as u16,
                             ))
-                        }
-                        InputRecord::FocusEvent(record) => {
-                            let event = if record.set_focus {
-                                Event::FocusGained
-                            } else {
-                                Event::FocusLost
-                            };
-                            Some(event)
                         }
                         _ => None,
                     };

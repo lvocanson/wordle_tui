@@ -18,7 +18,7 @@ That fell at change [#2](#changelog); the work continued from there.
 | Baseline — first crossterm+ratatui TUI | 396,288 | — | — |
 | Stable — no prerequisites, cross-platform | 214,016 (−46.0%) | 418,184 | 505,872 |
 | `build-std` — nightly, std without `backtrace`; terminal still restored on panic | 117,248 (−70.4%) | 184,760 | 279,568 |
-| `immediate-abort` — nightly, most aggressive; terminal **not** restored on panic | **50,898** (−87.2%) | 81,599 | 148,784 |
+| `immediate-abort` — nightly, most aggressive; terminal **not** restored on panic | **49,126** (−87.6%) | 73,415 | 148,784 |
 
 Caveats on that table, all of them about *when* a number was taken:
 
@@ -26,9 +26,9 @@ Caveats on that table, all of them about *when* a number was taken:
   The **immediate-abort** Windows and Linux-glibc figures are un-padded section totals from the current source, re-measured 2026-08-25 on the pinned toolchain (see below for why the two metrics differ); the musl figure is older.
 - Windows and Linux numbers are **not** comparable to each other: different linker, CRT and section layout, and glibc offloads libc to the system while the Windows `.exe` and musl do not.
   To compare platforms, re-measure both under the same lever.
-  Linux currently runs ~17 KB heavier than Windows, most of it the `.eh_frame` unwind tables (see [Stuck costs](#stuck-costs)).
+  Linux currently runs ~24 KB heavier than Windows, about half of it the `.eh_frame` unwind tables (see [Stuck costs](#stuck-costs)) and most of the rest the Unix input stack — mio, signal-hook and the signal-driven resize path — which has no Windows counterpart.
 
-The embedded corpus accounts for 14,283 B — 28% of the current Windows binary.
+The embedded corpus accounts for 14,283 B — 29% of the current Windows binary.
 
 ## How sizes are measured
 
@@ -144,6 +144,9 @@ Each row is explained in the section of the same number below.
 | 25 | Vendored crossterm: ASCII-only key case correction | −6,108 | 0 | 51,608 |
 | 26 | Vendored crossterm: millisecond poll clock | −534 | 0 | 51,074 |
 | 27 | `App` message in a fixed buffer | −176 | ≈ 0 | 50,898 |
+| 28 | Vendored crossterm: event set reduced to the game's inputs | −1,716 | 0 | 49,182 |
+| 29 | `ui::draw_board`/`draw_keyboard` outlined | −56 | — | 49,126 |
+| 30 | Vendored crossterm: the same event-set reduction on Unix | 0 | −8,184 | 49,126 |
 
 ### 1 — Base-26 word packing
 
@@ -385,6 +388,39 @@ The footer message was the binary's only `String` writer; it is now a fixed `[u8
 Only −176 B: the map shows most of the `String`/`RawVec` machinery is *shared* with the stuck OS-error path below (`error_string` builds a `String`), so the app's usage was riding on already-paid code.
 Kept: the code is no worse, and it decouples the app from `String` should the stuck path ever fall.
 
+### 28 — Vendored crossterm: event set reduced to the game's inputs
+
+`try_read` was the largest single `.text` symbol (2,923 B, plus its 552 B `.rdata` jump table).
+The Windows key/mouse parsers now deliver only what the game consumes — key presses (with the `ToUnicodeEx` layout path kept, so non-QWERTY layouts still type), left-button-down clicks, resizes; releases, Alt-codes, surrogate pairing, function/navigation `KeyCode`s, focus events and the other six mouse kinds are no longer parsed into events.
+`try_read` fell to 1,485 B and the jump table disappeared; details and the behaviour costs (all invisible here) in [LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md) change 7.
+Windows-only files — the Linux binary is byte-identical.
+
+### 29 — `ui::draw_board`/`draw_keyboard` outlined
+
+`build_grid` had both drawers inlined (2,471 B as one symbol).
+`#[inline(never)]` on the two splits it 2,471 → 1,388 + the two bodies, netting −56 B — less register pressure at the call sites beats the two extra calls.
+The same trick measured *larger* everywhere else it was tried (see below): outlining is not a rule, it is one more knob to measure per site.
+
+### 30 — Vendored crossterm: the same event-set reduction on Unix
+
+[#28](#28--vendored-crossterm-event-set-reduced-to-the-games-inputs) applied to the other platform, where `parse_event` — an incremental ANSI decoder, not a WinAPI record switch — was the binary's largest symbol at 4,851 B.
+The same principle (deliver only presses, left-clicks and resizes) is worth **−8,184 B** here versus −1,716 B on Windows, because the dropped parsers also anchored `str::parse`'s `FromStr` machinery, `str::split` and `core::fmt` integer padding, and because `parse_event`'s Alt+key branch made it *recursive*.
+Full breakdown, including the Unix-only `char::is_uppercase` → `is_ascii_uppercase` fix, in [LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md) change 7.
+
+The subtlety is **framing**, and it has no Windows analogue: the caller feeds bytes one at a time, so a sequence being dropped must still be consumed to its end (`Ok(None)` until a CSI final byte) before it is refused, or its tail resurfaces as ordinary keystrokes — an arrow key would type letters into the board.
+That, and every other behaviour claim above, is checked by driving the built binary through a real PTY (see below) rather than by reading the diff.
+
+**Behaviour is verified against a control binary, not asserted.**
+The parser changes are not covered by `cargo test` — no test drives a terminal — so `tools/pty_test.sh` runs the built binary under a PTY (`script -qec`, 80×30) and asserts on the bytes it renders: typing and submitting a word, an invalid word, backspace, Ctrl+C and Esc quitting, arrows/F-keys leaving the draft untouched, and clicks on the ENTER button and on a letter key in **both** mouse encodings driving the game.
+
+```bash
+bash tools/pty_test.sh target/x86_64-unknown-linux-gnu/release/wordle_tui
+```
+
+Run it against a **control** binary built from the previous commit too — that is what makes the output readable.
+On a first attempt three checks failed on *both* binaries: the pty line discipline was eating CR (`ICRNL`) and `0x03` (`ISIG`) before the app switched to raw mode — an artefact of the harness, not a regression, fixed by delaying the input.
+A patch is a regression only when the two runs differ.
+
 ## Rejected experiments
 
 Measured, then reverted.
@@ -399,15 +435,19 @@ Recorded so they are not retried.
 | `App::submit`: array copy → `guess == &self.target` | **+48 B** | Cleaner, but the comparison costs more than the copy. |
 | `ui::gaps`: indexed loop → `iter_mut().take(d).enumerate()` | **+16 B** | Clippy's suggestion; the `.take` iterator machinery costs more. Kept under `#[allow(needless_range_loop)]`. |
 | Raw-handle stdout on Windows (write to the stdout `HANDLE` via `File`/`WriteFile` to skip std's console UTF-16 path) | −314 B | The `File`/`WriteFile` path pulls back most of what the UTF-16 path freed. Not worth the `unsafe` handle wrapping, a platform-split writer type, and output-path risk that cannot be verified without a real Windows console. |
+| `run()`: key and click paths merged through one `Option<KeyEvent>` | **+196 B** | The intermediate `Option<KeyEvent>` (a large crossterm struct) spills more than the duplicated `handle_key` call sites cost. |
+| `run()`: first frame from a `Grid::empty()` instead of a thrown-away `build_grid` call | **+40 B** | Two identical call sites compile smaller than one call site plus an empty-grid constructor. |
+| `draw_footer` outlined | **+60 B** | Unlike [#29](#29--uidraw_boarddraw_keyboard-outlined): too small to win back its call overhead. |
+| `App::submit` outlined | **+60 B** | Same. |
 
 ## Stuck costs
 
 - **Stable profile: the panic runtime.**
   Backtrace machinery (~12 KB), `io::error` formatting (~3 KB) and `env` (~2 KB) are linked unavoidably; the `backtrace` lever ([#10](#10--build-std-without-stds-backtrace)) exists only on nightly.
-- **Linux `.eh_frame` + `.eh_frame_hdr` (~18.6 KB).**
+- **Linux `.eh_frame` + `.eh_frame_hdr` (11.9 KB, down from ~18.6 KB as the code they describe has shrunk).**
   Unwind tables from the *prebuilt* std, dead under `panic=abort` and immediate-abort since nothing unwinds, but this profile links prebuilt std, so no build flag drops them.
-  Reclaimable via build-std (`-Cforce-unwind-tables=no`) or a post-link `objcopy --remove-section .eh_frame --remove-section .eh_frame_hdr` (measured 118,608 → 99,956, −18,652 B) — the latter leaves a dangling `PT_GNU_EH_FRAME` program header, so validate at runtime before relying on it.
-  This is essentially the whole Windows/Linux gap.
+  Reclaimable via build-std (`-Cforce-unwind-tables=no`) or a post-link `objcopy --remove-section .eh_frame --remove-section .eh_frame_hdr` (measured at the time: 118,608 → 99,956, −18,652 B) — the latter leaves a dangling `PT_GNU_EH_FRAME` program header, so validate at runtime before relying on it.
+  About half the Windows/Linux gap; most of the rest is the Unix input stack (mio, signal-hook, the signal-driven resize path), which Windows does not have.
 - **Dependency features: nothing left to trim.**
   crossterm is at its floor ([#3](#3--crossterm-feature-floor)) — `events` is required for input, `windows` for raw mode/console, and crossterm has no `no_std` mode.
   On Windows, `events` pulls `mio`/`signal-hook`/`signal-hook-mio` only under `cfg(unix)`, so they are not compiled.

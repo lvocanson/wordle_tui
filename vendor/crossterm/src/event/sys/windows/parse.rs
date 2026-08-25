@@ -6,21 +6,22 @@ use winapi::um::{
     },
     winuser::{
         GetForegroundWindow, GetKeyboardLayout, GetWindowThreadProcessId, ToUnicodeEx, VK_BACK,
-        VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F24, VK_HOME, VK_INSERT,
-        VK_LEFT, VK_MENU, VK_NEXT, VK_NUMPAD0, VK_NUMPAD9, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT,
-        VK_TAB, VK_UP,
+        VK_CONTROL, VK_ESCAPE, VK_MENU, VK_RETURN, VK_SHIFT,
     },
 };
 
 use crate::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+
+// LOCAL PATCH — see …LOCAL_PATCH.md: the event set is reduced to what this app consumes — key
+// *presses* (Esc, Enter, Backspace, layout-resolved characters with modifiers), *left-button-down*
+// mouse events, and resizes. Key releases, alt-codes, surrogate pairs, function/navigation keys,
+// and every other mouse kind (up/drag/move/scroll, right/middle) are not parsed into events.
 
 #[derive(Default)]
 pub struct MouseButtonsPressed {
     pub(crate) left: bool,
-    pub(crate) right: bool,
-    pub(crate) middle: bool,
 }
 
 pub(crate) fn handle_mouse_event(
@@ -34,46 +35,8 @@ pub(crate) fn handle_mouse_event(
     None
 }
 
-enum WindowsKeyEvent {
-    KeyEvent(KeyEvent),
-    Surrogate(u16),
-}
-
-pub(crate) fn handle_key_event(
-    key_event: KeyEventRecord,
-    surrogate_buffer: &mut Option<u16>,
-) -> Option<Event> {
-    let windows_key_event = parse_key_event_record(&key_event)?;
-    match windows_key_event {
-        WindowsKeyEvent::KeyEvent(key_event) => {
-            // Discard any buffered surrogate value if another valid key event comes before the
-            // next surrogate value.
-            *surrogate_buffer = None;
-            Some(Event::Key(key_event))
-        }
-        WindowsKeyEvent::Surrogate(new_surrogate) => {
-            let ch = handle_surrogate(surrogate_buffer, new_surrogate)?;
-            let modifiers = KeyModifiers::from(&key_event.control_key_state);
-            let key_event = KeyEvent::new(KeyCode::Char(ch), modifiers);
-            Some(Event::Key(key_event))
-        }
-    }
-}
-
-fn handle_surrogate(surrogate_buffer: &mut Option<u16>, new_surrogate: u16) -> Option<char> {
-    match *surrogate_buffer {
-        Some(buffered_surrogate) => {
-            *surrogate_buffer = None;
-            std::char::decode_utf16([buffered_surrogate, new_surrogate])
-                .next()
-                .unwrap()
-                .ok()
-        }
-        None => {
-            *surrogate_buffer = Some(new_surrogate);
-            None
-        }
-    }
+pub(crate) fn handle_key_event(key_event: KeyEventRecord) -> Option<Event> {
+    parse_key_event_record(&key_event).map(Event::Key)
 }
 
 impl From<&ControlKeyState> for KeyModifiers {
@@ -185,62 +148,23 @@ fn get_char_for_key(key_event: &KeyEventRecord) -> Option<char> {
     Some(ch)
 }
 
-fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<WindowsKeyEvent> {
-    let modifiers = KeyModifiers::from(&key_event.control_key_state);
-    let virtual_key_code = key_event.virtual_key_code as i32;
-
-    // We normally ignore all key release events, but we will make an exception for an Alt key
-    // release if it carries a u_char value, as this indicates an Alt code.
-    let is_alt_code = virtual_key_code == VK_MENU && !key_event.key_down && key_event.u_char != 0;
-    if is_alt_code {
-        let utf16 = key_event.u_char;
-        match utf16 {
-            surrogate @ 0xD800..=0xDFFF => {
-                return Some(WindowsKeyEvent::Surrogate(surrogate));
-            }
-            unicode_scalar_value => {
-                // Unwrap is safe: We tested for surrogate values above and those are the only
-                // u16 values that are invalid when directly interpreted as unicode scalar
-                // values.
-                let ch = std::char::from_u32(unicode_scalar_value as u32).unwrap();
-                let key_code = KeyCode::Char(ch);
-                let kind = if key_event.key_down {
-                    KeyEventKind::Press
-                } else {
-                    KeyEventKind::Release
-                };
-                let key_event = KeyEvent::new_with_kind(key_code, modifiers, kind);
-                return Some(WindowsKeyEvent::KeyEvent(key_event));
-            }
-        }
-    }
-
-    // Don't generate events for numpad key presses when they're producing Alt codes.
-    let is_numpad_numeric_key = (VK_NUMPAD0..=VK_NUMPAD9).contains(&virtual_key_code);
-    let is_only_alt_modifier = modifiers.contains(KeyModifiers::ALT)
-        && !modifiers.contains(KeyModifiers::SHIFT | KeyModifiers::CONTROL);
-    if is_only_alt_modifier && is_numpad_numeric_key {
+fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<KeyEvent> {
+    // LOCAL PATCH — see …LOCAL_PATCH.md: presses only. Upstream keeps releases for the Alt-code
+    // exception (an Alt release carrying a u_char); with Alt-code input dropped, releases carry
+    // nothing this app reads, and `KeyEvent::new` defaults the kind to Press.
+    if !key_event.key_down {
         return None;
     }
+    let modifiers = KeyModifiers::from(&key_event.control_key_state);
 
-    let parse_result = match virtual_key_code {
+    let parse_result = match key_event.virtual_key_code as i32 {
         VK_SHIFT | VK_CONTROL | VK_MENU => None,
         VK_BACK => Some(KeyCode::Backspace),
         VK_ESCAPE => Some(KeyCode::Esc),
         VK_RETURN => Some(KeyCode::Enter),
-        VK_F1..=VK_F24 => Some(KeyCode::F((key_event.virtual_key_code - 111) as u8)),
-        VK_LEFT => Some(KeyCode::Left),
-        VK_UP => Some(KeyCode::Up),
-        VK_RIGHT => Some(KeyCode::Right),
-        VK_DOWN => Some(KeyCode::Down),
-        VK_PRIOR => Some(KeyCode::PageUp),
-        VK_NEXT => Some(KeyCode::PageDown),
-        VK_HOME => Some(KeyCode::Home),
-        VK_END => Some(KeyCode::End),
-        VK_DELETE => Some(KeyCode::Delete),
-        VK_INSERT => Some(KeyCode::Insert),
-        VK_TAB if modifiers.contains(KeyModifiers::SHIFT) => Some(KeyCode::BackTab),
-        VK_TAB => Some(KeyCode::Tab),
+        // Function/navigation keys fall through here with u_char == 0 (or a control code for
+        // Tab): `get_char_for_key` then resolves to nothing (or a control char the game
+        // ignores), so their dedicated KeyCode arms are gone.
         _ => {
             let utf16 = key_event.u_char;
             match utf16 {
@@ -248,35 +172,20 @@ fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<WindowsKeyEvent>
                     // Some key combinations generate either no u_char value or generate control
                     // codes. To deliver back a KeyCode::Char(...) event we want to know which
                     // character the key normally maps to on the user's keyboard layout.
-                    // The keys that intentionally generate control codes (ESC, ENTER, TAB, etc.)
+                    // The keys that intentionally generate control codes (ESC, ENTER, etc.)
                     // are handled by their virtual key codes above.
                     get_char_for_key(key_event).map(KeyCode::Char)
                 }
-                surrogate @ 0xD800..=0xDFFF => {
-                    return Some(WindowsKeyEvent::Surrogate(surrogate));
-                }
+                // Surrogate halves land in the `None` of `from_u32` and are dropped (upstream
+                // pairs them up across events to deliver astral-plane chars).
                 unicode_scalar_value => {
-                    // Unwrap is safe: We tested for surrogate values above and those are the only
-                    // u16 values that are invalid when directly interpreted as unicode scalar
-                    // values.
-                    let ch = std::char::from_u32(unicode_scalar_value as u32).unwrap();
-                    Some(KeyCode::Char(ch))
+                    std::char::from_u32(unicode_scalar_value as u32).map(KeyCode::Char)
                 }
             }
         }
     };
 
-    if let Some(key_code) = parse_result {
-        let kind = if key_event.key_down {
-            KeyEventKind::Press
-        } else {
-            KeyEventKind::Release
-        };
-        let key_event = KeyEvent::new_with_kind(key_code, modifiers, kind);
-        return Some(WindowsKeyEvent::KeyEvent(key_event));
-    }
-
-    None
+    parse_result.map(|key_code| KeyEvent::new(key_code, modifiers))
 }
 
 // The 'y' position of a mouse event or resize event is not relative to the window but absolute to screen buffer.
@@ -297,55 +206,12 @@ fn parse_mouse_event_record(
 
     let button_state = event.button_state;
 
+    // LOCAL PATCH — see …LOCAL_PATCH.md: only a fresh left-button press becomes an event; the
+    // upstream arms for releases, right/middle buttons, motion/drag and both scroll axes are gone.
     let kind = match event.event_flags {
         EventFlags::PressOrRelease | EventFlags::DoubleClick => {
             if button_state.left_button() && !buttons_pressed.left {
                 Some(MouseEventKind::Down(MouseButton::Left))
-            } else if !button_state.left_button() && buttons_pressed.left {
-                Some(MouseEventKind::Up(MouseButton::Left))
-            } else if button_state.right_button() && !buttons_pressed.right {
-                Some(MouseEventKind::Down(MouseButton::Right))
-            } else if !button_state.right_button() && buttons_pressed.right {
-                Some(MouseEventKind::Up(MouseButton::Right))
-            } else if button_state.middle_button() && !buttons_pressed.middle {
-                Some(MouseEventKind::Down(MouseButton::Middle))
-            } else if !button_state.middle_button() && buttons_pressed.middle {
-                Some(MouseEventKind::Up(MouseButton::Middle))
-            } else {
-                None
-            }
-        }
-        EventFlags::MouseMoved => {
-            let button = if button_state.right_button() {
-                MouseButton::Right
-            } else if button_state.middle_button() {
-                MouseButton::Middle
-            } else {
-                MouseButton::Left
-            };
-            if button_state.release_button() {
-                Some(MouseEventKind::Moved)
-            } else {
-                Some(MouseEventKind::Drag(button))
-            }
-        }
-        EventFlags::MouseWheeled => {
-            // Vertical scroll
-            // from https://docs.microsoft.com/en-us/windows/console/mouse-event-record-str
-            // if `button_state` is negative then the wheel was rotated backward, toward the user.
-            if button_state.scroll_down() {
-                Some(MouseEventKind::ScrollDown)
-            } else if button_state.scroll_up() {
-                Some(MouseEventKind::ScrollUp)
-            } else {
-                None
-            }
-        }
-        EventFlags::MouseHwheeled => {
-            if button_state.scroll_left() {
-                Some(MouseEventKind::ScrollLeft)
-            } else if button_state.scroll_right() {
-                Some(MouseEventKind::ScrollRight)
             } else {
                 None
             }

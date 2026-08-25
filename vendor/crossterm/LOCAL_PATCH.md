@@ -1,11 +1,11 @@
 # Vendored crossterm 0.29.0 — local patch
 
-The crates.io source of **crossterm 0.29.0** with six targeted changes, kept in-tree and used **opt-in** by the size-optimized builds.
+The crates.io source of **crossterm 0.29.0** with seven targeted changes, kept in-tree and used **opt-in** by the size-optimized builds.
 This file is the single place that explains the vendoring; `Cargo.toml`, `.cargo/*`, [BUILD.md](../../BUILD.md) and [OPTIMIZATION.md](../../OPTIMIZATION.md) only point here.
 Every patched site carries a `// LOCAL PATCH — see …LOCAL_PATCH.md` marker.
 
 Changes 1–3 rest on the same fact: **this app is single-threaded** — one event-loop thread in `main::run`, no thread is spawned anywhere — so crossterm's global synchronization, and its fallback paths for hostile environments, are pure overhead.
-Changes 4–6 remove what this app never reads: error-message payloads, full-unicode key case mapping, and sub-millisecond poll timing.
+Changes 4–7 remove what this app never reads: error-message payloads, full-unicode key case mapping, sub-millisecond poll timing, and every event kind the game does not consume.
 
 | # | Change | Patched file | Δ Windows | Δ Linux |
 |---|--------|--------------|----------:|--------:|
@@ -15,6 +15,7 @@ Changes 4–6 remove what this app never reads: error-message payloads, full-uni
 | 4 | No `io::Error` message payloads | `event/read.rs`, `event/sys/windows{,/poll}.rs`, `event/sys/unix/parse.rs` | −6,580 | ≈ 0 * |
 | 5 | ASCII-only key case correction | `event/sys/windows/parse.rs` | −6,108 | 0 |
 | 6 | Millisecond poll clock | `event/timeout.rs` | −534 | 0 |
+| 7 | Event set reduced to the game's inputs | `event/source/windows.rs`, `event/sys/windows/parse.rs`, `event/sys/unix/parse.rs` | −1,716 | −8,184 |
 
 Bytes are un-padded section totals on the immediate-abort profile, the metric [OPTIMIZATION.md](../../OPTIMIZATION.md) compares.
 A `0` marks a platform the change structurally cannot affect (the patched file or branch is for the other platform).
@@ -124,6 +125,40 @@ Millisecond resolution is exactly what `WaitForMultipleObjects` consumes anyway;
 The only `unsafe` is the `GetTickCount64` FFI call (kernel32, always linked, cannot fail).
 
 Measured on Windows (immediate-abort): **51,608 → 51,074 B, −534 B**.
+
+## 7. Event set reduced to the game's inputs
+
+Both platforms' event sources and parsers deliver only what this app consumes: key **presses** (Esc, Enter, Backspace, Ctrl+letter, and printable characters), **left-button-down** mouse events with their position, and resizes.
+Everything else stops at the parser.
+
+**This is by far the least upstream-shaped patch — re-audit it first when re-vendoring.**
+It is also the one crossterm's own unit tests no longer describe: the `#[cfg(test)]` module in `event/sys/unix/parse.rs` still asserts upstream behaviour and would fail if anyone ran crossterm's test suite (nothing here does — it is built lib-only as a dependency).
+
+### Windows (`event/source/windows.rs`, `event/sys/windows/parse.rs`)
+
+Kept: presses only, with `get_char_for_key`'s `ToUnicodeEx` path intact so non-QWERTY layouts still type.
+Dropped: key releases (upstream kept them for the Alt-code exception, itself dropped), Alt-codes, surrogate pairing (a lone surrogate `u_char` now falls into `char::from_u32`'s `None`), the function/navigation `KeyCode` arms (F1–F24, arrows, Home/End/PageUp/PageDown, Insert/Delete, Tab — their `u_char` resolves to no character or to a control char the game ignores), `FocusGained`/`FocusLost`, and every other mouse kind (up, drag, move, both scroll axes, right/middle buttons).
+This also deleted the parser's 552 B `.rdata` jump table and the `decode_utf16` machinery.
+
+Measured (immediate-abort): **50,898 → 49,182 B, −1,716 B**.
+
+### Unix (`event/sys/unix/parse.rs`)
+
+The same reduction against a very different parser — an incremental ANSI decoder rather than a WinAPI record switch — so the mechanics differ:
+
+- `parse_event` keeps Esc, `\r`, `\x7F`, the Ctrl+letter range (which carries Ctrl+C) and the UTF-8 character path. Dropped: SS3 sequences (`ESC O x`), the Alt+key branch — which was also `parse_event`'s **recursive** call — Tab, and the remaining control-code arms. `\n` and `\t` fall into Ctrl+J/Ctrl+I; upstream only differs outside raw mode, and this app is always in raw mode.
+- `parse_csi` keeps the two mouse encodings and collapses everything else — arrows, F-keys, Home/End/PageUp/PageDown, Insert/Delete, BackTab, focus in/out, the kitty protocol, cursor-position and device-attribute replies, bracketed paste — into a single drop rule.
+- Both mouse decoders keep only a left-button press, and read their parameters with a small byte-level decimal scan instead of `str::parse`, whose `FromStr` machinery dwarfed the three numbers it produced. rxvt mouse encoding (mode 1015) is dropped: it is only ever selected by a terminal that supports 1015 but not SGR 1006, which in practice means rxvt itself.
+- `char_code_to_event` tests `is_ascii_uppercase` rather than `char::is_uppercase`, the Unix counterpart of change 5: a non-ASCII capital now arrives without the SHIFT modifier, the character itself unchanged.
+
+**Framing is the subtle part.** The caller feeds bytes one at a time and treats `Ok(None)` as "incomplete, keep buffering" and `Err` as "clear the buffer and carry on".
+A dropped sequence must therefore still be *consumed whole* before being refused, or its tail would be re-parsed as ordinary keystrokes — an arrow key would type letters into the board.
+So the drop rule waits for a CSI final byte (`0x40..=0x7E`) before erroring, `ESC O` waits for its third byte, and `ESC [ [` keeps its own arm because `[` is itself a final byte.
+`tools/pty_test.sh` covers exactly this (arrows, F-keys and `ESC [ 5~` must leave the draft empty), along with the rest of the input path on both mouse encodings.
+
+Measured (immediate-abort): **81,599 → 73,415 B, −8,184 B** — far more than on Windows, because `parse_event` was the binary's single largest symbol (4,851 B) and its parameter parsing anchored `FromStr`, `str::split` and `core::fmt` padding on top.
+
+The unused parsers are left in the file, unreferenced, behind a file-level `#![allow(dead_code)]`, so a re-vendor stays a small diff — same reasoning as `tput_value`/`tput_size` in change 1.
 
 ## Upgrading crossterm
 
