@@ -4,17 +4,36 @@ Three profiles, each with **one command per platform that produces the smallest 
 
 - **Stable** — full std, no nightly, no `rust-src`.
 - **build-std** — nightly; std recompiled without its backtrace machinery.
-  The recommended build.
 - **immediate-abort** — nightly; most aggressive (every panic → bare abort).
 
-The `build-std` and `immediate-abort` profiles use a **pinned** nightly (`nightly-2026-08-25`, same pin as `tools/validate.sh` and CI): binary sizes are only comparable at equal rustc, so the measured numbers in OPTIMIZATION.md are tied to this toolchain.
+## One command
+
+`./wtui-cargo.sh` runs any of these profiles with the toolchain, target and flags that fit the machine it is on — the same commands as below, with the prerequisites installed on demand:
+
+```bash
+./wtui-cargo.sh run                       # stable, host-native (= cargo run --release)
+./wtui-cargo.sh build --build-std
+./wtui-cargo.sh run --immediate-abort     # + the vendored crossterm: the shipping profile
+./wtui-cargo.sh build --immediate-abort --target x86_64-unknown-linux-musl
+./wtui-cargo.sh build --build-std -n      # print the cargo command it would run, run nothing
+```
+
+It installs the pinned nightly **with `rust-src`** and adds a missing `--target`, forwards anything it does not recognise to cargo, and puts `Cargo.lock` back after a vendored-crossterm build. `./wtui-cargo.sh --help` for the rest.
+
+The flags reach cargo through `--config target.<triple>.rustflags=[…]`, which **merges** with the `[target]` blocks of `.cargo/config.toml` — the reason the script never repeats `/OPT:ICF` & co. while the hand-typed `RUSTFLAGS` lines below have to.
+
+The rest of this file is what the script runs, profile by profile.
+
+---
+
+The `build-std` and `immediate-abort` profiles use a **pinned** nightly (`nightly-2026-08-25`, declared in `wtui-cargo.sh`, which `tools/validate.sh` and CI both build through): binary sizes are only comparable at equal rustc, so the measured numbers in OPTIMIZATION.md are tied to this toolchain.
 Install it once:
 
 ```
 rustup toolchain install nightly-2026-08-25 --profile minimal --component rust-src
 ```
 
-To bump the pin, update it here, in `tools/validate.sh` and in `.github/workflows/ci.yml`, then re-measure the reference totals.
+To bump the pin, change `NIGHTLY` in `wtui-cargo.sh` and the version quoted here, then re-measure the reference totals.
 
 ### Vendored crossterm (opt-in, size)
 

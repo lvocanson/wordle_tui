@@ -33,7 +33,7 @@ The embedded corpus accounts for 14,283 B — 29% of the current Windows binary.
 ## How sizes are measured
 
 Build with a profile from [BUILD.md](BUILD.md), then measure with `tools/stats.rs`.
-Totals are only comparable at equal rustc — a toolchain bump alone moved the Windows total by tens of bytes — so the measurement toolchain is **pinned** (`nightly-2026-08-25`, shared by BUILD.md, `tools/validate.sh` and CI); bump it deliberately and re-measure the reference totals when you do.
+Totals are only comparable at equal rustc — a toolchain bump alone moved the Windows total by tens of bytes — so the measurement toolchain is **pinned** (in `wtui-cargo.sh`); bump it deliberately and re-measure the reference totals when you do.
 The tool only *measures* — it never builds, so build first:
 
 ```bash

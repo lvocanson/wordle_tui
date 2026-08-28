@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/lvocanson/wordle_tui/actions/workflows/ci.yml/badge.svg)](https://github.com/lvocanson/wordle_tui/actions/workflows/ci.yml)
 
-Wordle in the terminal: full-screen board, on-screen keyboard, mouse or keyboard input, and a 14,853-word dictionary — in a **64 KB** binary built on one dependency (`crossterm`, plus `crossterm_winapi` on Windows, already in crossterm's own tree) with no runtime files.
+Wordle in the terminal: full-screen board, on-screen keyboard, mouse or keyboard input, and a 14,853-word dictionary — in a **50 KB** binary built on one dependency (`crossterm`) with no runtime files.
 
 <p align="center">
   <img src="docs/demo.gif" width="400"
@@ -10,10 +10,11 @@ Wordle in the terminal: full-screen board, on-screen keyboard, mouse or keyboard
 </p>
 
 ```bash
-cargo run --release
+cargo run --release                      # stable, ~160 KB
+./wtui-cargo.sh run --immediate-abort    # nightly, 50 KB — toolchain and flags handled for you
 ```
 
-Rust stable, no prerequisites.
+Rust stable builds and runs with no prerequisites.
 Windows and Linux are the tested targets.
 
 ## Playing
@@ -78,6 +79,7 @@ See [OPTIMIZATION.md](OPTIMIZATION.md) for how the encoding was arrived at.
 | `docs/` | the README's demo GIFs |
 | `tools/stats.rs` | compression and binary-size reporter (`cargo run --example stats`) |
 | `tools/validate.sh` | one-shot tests + Windows/Linux builds + size report |
+| `wtui-cargo.sh` | build driver: one command per profile, prerequisites installed on demand |
 | `vendor/crossterm/` | patched crossterm 0.29.0, opt-in (see its `LOCAL_PATCH.md`) |
 
 ## Tests

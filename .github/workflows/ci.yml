@@ -9,11 +9,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-env:
-  # Pinned measurement toolchain — totals are only comparable at equal rustc. Same pin as
-  # tools/validate.sh and BUILD.md; bump deliberately and re-measure the reference totals.
-  NIGHTLY: nightly-2026-08-25
-
 jobs:
   checks:
     name: checks (${{ matrix.os }})
@@ -42,35 +37,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # wtui-cargo.sh detects the triple from the runner it lands on, so `target` here only names
+        # the path the binary comes out at (and labels the job); the toolchain pin, the flags and
+        # the vendored-crossterm patch all live in the script.
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             suffix: .exe
-            # RUSTFLAGS overrides the [target] block in .cargo/config.toml (no merge),
-            # so the link args are repeated here — same lines as BUILD.md.
-            rustflags: >-
-              -Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort
-              -Clink-arg=/OPT:ICF -Clink-arg=/DEBUG:NONE
-              -Clink-arg=/MAP:target/wordle_tui.map
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             suffix: ''
-            rustflags: >-
-              -Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort
-              -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none
-              -Clink-arg=-Wl,-Map=target/wordle_tui-linux.map
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - name: Install pinned nightly + rust-src (build-std)
-        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal --component rust-src
+      # No rustup step: the script installs the pinned nightly and its rust-src component itself.
+      # `bash wtui-cargo.sh` rather than `./wtui-cargo.sh` so this does not depend on the executable bit
+      # surviving the checkout.
       - name: Build — immediate-abort + vendored crossterm
-        env:
-          RUSTFLAGS: ${{ matrix.rustflags }}
-        run: cargo +${{ env.NIGHTLY }} build --release --target ${{ matrix.target }} --config .cargo/crossterm-patch.toml
+        shell: bash
+        run: bash wtui-cargo.sh build --immediate-abort
       - name: Size report
         shell: bash
         run: |

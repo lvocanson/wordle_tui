@@ -14,8 +14,11 @@
 # summary at the end.
 #
 # Profile = immediate-abort + vendored crossterm (the shipping/measurement profile; see BUILD.md).
-# Cargo.lock is rewritten by the `--config` patch build (registry -> path); this script restores it
-# on exit (caveat in vendor/crossterm/LOCAL_PATCH.md).
+# Both builds go through ./wtui-cargo.sh, so the toolchain pin, the per-platform flags and the
+# vendored-crossterm patch are defined once, there, and never duplicated here.
+# Cargo.lock is rewritten by the patched build (registry -> path); wtui-cargo.sh puts it back, and the
+# trap below is the belt-and-braces version for anything that dies earlier (caveat in
+# vendor/crossterm/LOCAL_PATCH.md).
 
 set -uo pipefail
 
@@ -26,16 +29,11 @@ cd "$REPO"
 LOG="$(mktemp)"
 trap 'rm -f "$LOG"; git checkout -- Cargo.lock 2>/dev/null || true' EXIT
 
-# Pinned measurement toolchain: totals are only comparable at equal rustc, so every nightly
-# command below uses this dated toolchain (same pin as CI and BUILD.md). Bump deliberately, and
-# re-measure the reference totals when you do.
-NIGHTLY='nightly-2026-08-25'
-
-# The /MAP and -Map args make the link emit its symbol map (byte-neutral, verified — see
-# OPTIMIZATION.md "Symbol attribution"); tools/bloat.rs reads it. Same lines as BUILD.md.
-WIN_FLAGS='-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clink-arg=/OPT:ICF -Clink-arg=/DEBUG:NONE -Clink-arg=/MAP:target/wordle_tui.map'
-LIN_FLAGS='-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none -Clink-arg=-Wl,-Map=target/wordle_tui-linux.map'
-CONFIG='--config .cargo/crossterm-patch.toml'
+# The measurement toolchain is pinned in wtui-cargo.sh (totals are only comparable at equal rustc);
+# bump it there and re-measure the reference totals. Same for the immediate-abort flags, including
+# the /MAP and -Map args that make the link emit the symbol map tools/bloat.rs reads below
+# (byte-neutral, verified — see OPTIMIZATION.md "Symbol attribution"). Only the paths those maps
+# and binaries land in are spelled out here.
 WIN_TARGET='x86_64-pc-windows-msvc'
 LIN_TARGET='x86_64-unknown-linux-gnu'
 WIN_BIN="target/${WIN_TARGET}/release/wordle_tui.exe"
@@ -69,7 +67,7 @@ fi
 
 # ---------------------------------------------------------------------------
 section "WINDOWS BUILD — immediate-abort"
-if try "windows build" env RUSTFLAGS="$WIN_FLAGS" cargo "+$NIGHTLY" build --release --target "$WIN_TARGET" $CONFIG; then
+if try "windows build" bash wtui-cargo.sh build --immediate-abort; then
   grep -iE 'warning|Finished' "$LOG" || true
   # Cargo may print "patch ... was not used in the crate graph" even when the vendored crossterm
   # IS used (it fires whenever the patched version equals the registry one), so that warning is
@@ -100,16 +98,16 @@ if [ "$DO_LINUX" = 1 ]; then
     echo "!! could not resolve WSL path for '$WIN_PATH' — is WSL installed? (skip with --no-linux)"
     FAILED+=("linux (wsl path)")
   else
-    # Same structure as the Windows steps, run inside WSL: build (log tail on failure), then the
-    # same stats.rs reporter. The --config build in WSL rewrites the same Cargo.lock; the EXIT
-    # trap restores it.
+    # Same structure as the Windows steps, run inside WSL: the same wtui-cargo.sh build (it picks the
+    # Linux triple and flags up from the host it now runs on), then the same stats.rs reporter.
+    # That build rewrites the same shared Cargo.lock; wtui-cargo.sh restores it, the EXIT trap too.
     wsl.exe -e bash -lc "
       set -u
       cd '$WSL_PATH' || exit 1
       export CARGO_TARGET_DIR=/tmp/wordle_target
       BIN=/tmp/wordle_target/$LIN_TARGET/release/wordle_tui
       LOG=\$(mktemp); trap 'rm -f \"\$LOG\"' EXIT
-      if RUSTFLAGS='$LIN_FLAGS' cargo +$NIGHTLY build --release --target $LIN_TARGET $CONFIG >\"\$LOG\" 2>&1; then
+      if bash wtui-cargo.sh build --immediate-abort >\"\$LOG\" 2>&1; then
         grep -iE 'warning|Finished' \"\$LOG\" || true
       else
         tail -n 40 \"\$LOG\"; exit 1
