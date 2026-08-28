@@ -29,7 +29,7 @@ jobs:
       - name: tests
         run: cargo test
 
-  # Builds the shipping profile (immediate-abort + vendored crossterm, see BUILD.md) and publishes
+  # Builds the shipping profile (immediate-abort, see BUILD.md) and publishes
   # the size report from tools/stats.rs in the job summary. The section total printed there is the
   # number OPTIMIZATION.md tracks; the job itself never fails on size — it makes drift visible.
   size:
@@ -38,8 +38,8 @@ jobs:
       fail-fast: false
       matrix:
         # wtui-cargo.sh detects the triple from the runner it lands on, so `target` here only names
-        # the path the binary comes out at (and labels the job); the toolchain pin, the flags and
-        # the vendored-crossterm patch all live in the script.
+        # the path the binary comes out at (and labels the job); the toolchain pin and the flags
+        # both live in the script.
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -56,7 +56,7 @@ jobs:
       # No rustup step: the script installs the pinned nightly and its rust-src component itself.
       # `bash wtui-cargo.sh` rather than `./wtui-cargo.sh` so this does not depend on the executable bit
       # surviving the checkout.
-      - name: Build — immediate-abort + vendored crossterm
+      - name: Build — immediate-abort
         shell: bash
         run: bash wtui-cargo.sh build --immediate-abort
       - name: Size report
@@ -65,7 +65,7 @@ jobs:
           BIN="target/${{ matrix.target }}/release/wordle_tui${{ matrix.suffix }}"
           cargo run --example stats -- "$BIN" | tee stats.txt
           {
-            echo "### ${{ matrix.target }} — immediate-abort + vendored crossterm"
+            echo "### ${{ matrix.target }} — immediate-abort"
             echo '```'
             cat stats.txt
             echo '```'

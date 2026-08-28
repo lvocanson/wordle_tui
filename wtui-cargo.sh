@@ -21,9 +21,7 @@
 #     blocks of .cargo/config.toml. An env RUSTFLAGS OVERRIDES them instead, which is why the
 #     BUILD.md lines have to repeat /OPT:ICF, /DEBUG:NONE and --build-id=none, and this does not.
 #
-# Options: --stable (default) | --build-std | --immediate-abort, --target <triple>, -n/--dry-run,
-# --upstream-crossterm / --vendored-crossterm (the vendored copy is on by default for
-# immediate-abort — that combination is the shipping/measurement profile — and off elsewhere).
+# Options: --stable (default) | --build-std | --immediate-abort, --target <triple>, -n/--dry-run.
 # Anything else is forwarded to cargo untouched: `-v`, `--features …`, `-- --args-for-the-game`.
 #
 # Run from anywhere (it cd's to the repo root). Use Git Bash on Windows, like tools/validate.sh:
@@ -50,7 +48,6 @@ PROFILE=stable
 CMD=''
 TARGET=''
 DRY=0
-VENDORED=-1          # -1 = not asked for, decided by the profile below
 EXTRA=()
 
 while [ $# -gt 0 ]; do
@@ -58,8 +55,6 @@ while [ $# -gt 0 ]; do
     --stable)             PROFILE=stable ;;
     --build-std)          PROFILE=build-std ;;
     --immediate-abort)    PROFILE=immediate-abort ;;
-    --vendored-crossterm) VENDORED=1 ;;
-    --upstream-crossterm) VENDORED=0 ;;
     --target)             [ $# -ge 2 ] || die "--target needs a triple"; TARGET="$2"; shift ;;
     --target=*)           TARGET="${1#*=}" ;;
     -n|--dry-run)         DRY=1 ;;
@@ -71,12 +66,6 @@ while [ $# -gt 0 ]; do
   shift
 done
 CMD="${CMD:-build}"
-
-if [ "$VENDORED" -eq -1 ]; then
-  # immediate-abort + vendored crossterm is the profile OPTIMIZATION.md measures and CI publishes;
-  # the other two build against upstream, as in BUILD.md.
-  if [ "$PROFILE" = immediate-abort ]; then VENDORED=1; else VENDORED=0; fi
-fi
 
 # --- platform ----------------------------------------------------------------------------------
 have rustup || die "rustup not found — install it from https://rustup.rs"
@@ -160,7 +149,6 @@ if [ "$PROFILE" != stable ] || [ "$TARGET" != "$HOST" ]; then
   ARGS+=(--target "$TARGET")
 fi
 [ ${#FLAGS[@]} -gt 0 ] && ARGS+=(--config "target.$TARGET.rustflags=$(toml_array "${FLAGS[@]}")")
-[ "$VENDORED" -eq 1 ] && ARGS+=(--config .cargo/crossterm-patch.toml)
 ARGS+=(${EXTRA[@]+"${EXTRA[@]}"})
 
 EXT=''; case "$TARGET" in *windows*) EXT='.exe' ;; esac
@@ -170,16 +158,8 @@ else                             OUT="$DIR/release/wordle_tui$EXT"; fi
 
 show(){ local a out=''; for a; do case "$a" in *[\ \"\[]*) out="$out '$a'" ;; *) out="$out $a" ;; esac; done; printf '%s\n' "${out# }"; }
 say "profile: $PROFILE | target: $TARGET | toolchain: ${TOOLCHAIN:-default}"
-[ "$VENDORED" -eq 1 ] && note "vendored crossterm (vendor/crossterm/LOCAL_PATCH.md)"
 show "${ARGS[@]}"
 [ "$DRY" -eq 1 ] && exit 0
-
-# The crossterm patch rewrites Cargo.lock (registry entry -> path entry). Put the file back the
-# way it was on the way out, like tools/validate.sh does — same caveat, same fix.
-if [ "$VENDORED" -eq 1 ] && [ -f Cargo.lock ]; then
-  LOCK="$(mktemp)"; cp Cargo.lock "$LOCK"
-  trap 'cp "$LOCK" Cargo.lock; rm -f "$LOCK"' EXIT
-fi
 
 "${ARGS[@]}"; RC=$?
 if [ "$RC" -eq 0 ] && [ "$CMD" = build ] && [ -f "$OUT" ]; then

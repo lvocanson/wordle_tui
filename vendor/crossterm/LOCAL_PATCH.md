@@ -1,7 +1,6 @@
 # Vendored crossterm 0.29.0 — local patch
 
-The crates.io source of **crossterm 0.29.0** with seven targeted changes, kept in-tree and used **opt-in** by the size-optimized builds.
-This file is the single place that explains the vendoring; `Cargo.toml`, `.cargo/*`, [BUILD.md](../../BUILD.md) and [OPTIMIZATION.md](../../OPTIMIZATION.md) only point here.
+The crates.io source of **crossterm 0.29.0** with seven targeted changes.
 Every patched site carries a `// LOCAL PATCH — see …LOCAL_PATCH.md` marker.
 
 Changes 1–3 rest on the same fact: **this app is single-threaded** — one event-loop thread in `main::run`, no thread is spawned anywhere — so crossterm's global synchronization, and its fallback paths for hostile environments, are pure overhead.
@@ -21,29 +20,6 @@ Bytes are un-padded section totals on the immediate-abort profile, the metric [O
 A `0` marks a platform the change structurally cannot affect (the patched file or branch is for the other platform).
 Changes 2 and 3 remove the same dependency from opposite ends, so their per-platform figures are not independent — see change 3.
 `*` Changes 4–6 were measured on Linux only in aggregate: sections shrink ~430 B (`.text`, `.rodata`, `.eh_frame`, `.rela.dyn`) but RELRO page alignment grows `.relro_padding` by almost exactly that, for a net −1 B total.
-
-## How it is wired
-
-A `[patch.crates-io]` table cannot be gated behind a cargo feature, and pinning every build to a frozen vendored copy is not wanted.
-So the patch lives in **`.cargo/crossterm-patch.toml`**, which cargo does *not* auto-load — only `.cargo/config.toml` is — and is injected explicitly on the size-optimized command lines:
-
-```bash
-cargo build --release --config .cargo/crossterm-patch.toml
-```
-
-- plain `cargo build` → **upstream** crossterm 0.29.x from crates.io, kept updatable;
-- `--config .cargo/crossterm-patch.toml` → this **vendored** copy.
-
-BUILD.md's commands already append the flag where it belongs.
-Relative paths inside a `--config` file resolve from the parent of that file's directory, which is why the file sits in `.cargo/`: `path = "vendor/crossterm"` then resolves to `<repo>/vendor/crossterm`.
-
-> **Caveat — `Cargo.lock` churn.**
-> A `--config` build rewrites the lockfile's crossterm entry (registry → path).
-> The committed lockfile tracks upstream, so that churn must not be committed: `git checkout -- Cargo.lock` afterwards, or leave it unstaged.
-> `tools/validate.sh` restores it automatically.
-
-The patch does **not** touch crossterm's `Cargo.toml`: `parking_lot` stays in the dependency graph and is still compiled, so `cargo tree` keeps listing it.
-What changes is that nothing references it any more, so none of its code reaches the linked binary.
 
 ## 1. ioctl-only `terminal::size()`
 
@@ -98,7 +74,7 @@ This is sound here because access is **single-threaded and non-reentrant**:
 Validated end-to-end on a real Linux PTY — typed a word, submitted it, quit with the terminal correctly restored — which exercises exactly the `event.rs` and raw-mode paths.
 
 The invariant is the app's, not crossterm's: this copy is **not** safe for a multi-threaded consumer.
-That is precisely why it stays opt-in and out of upstream.
+That is precisely why it stays in-tree and out of upstream.
 
 ## 4. No `io::Error` message payloads
 
@@ -162,8 +138,7 @@ The unused parsers are left in the file, unreferenced, behind a file-level `#![a
 
 ## Upgrading crossterm
 
-For the default build, bump the upstream version in the workspace `Cargo.toml` as usual — nothing here is involved.
-Re-vendor and re-apply the three changes only when the optimized build should move to the new version: fetch the new source, copy `src/`, `Cargo.toml`, `LICENSE` and `README.md` over this directory (this file excepted), then grep the new source for the three sites above.
+Moving to a new crossterm is a re-vendor: fetch the new source, copy `src/`, `Cargo.toml`, `LICENSE` and `README.md` over this directory (this file excepted), grep it for the sites listed above and re-apply each change, then bump the version requirement in the workspace `Cargo.toml` to match.
 
 To review the current patch, or to check that a re-vendor left exactly the intended changes, diff against the registry copy:
 

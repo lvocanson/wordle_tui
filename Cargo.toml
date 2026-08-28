@@ -16,7 +16,6 @@ panic = "abort"
 overflow-checks = false
 
 [dependencies]
-# Size-optimized builds swap crossterm for a vendored copy — see vendor/crossterm/LOCAL_PATCH.md.
 crossterm = { version = "0.29.0", default-features = false, features = ["windows", "events"] }
 
 # Windows-only: lets us enable VT (ANSI) processing on the console ourselves (see main::enable_vt),
@@ -39,3 +38,9 @@ path = "tools/bloat.rs"
 # Tooling-only (examples); dev-dependencies never link into the game binary.
 [dev-dependencies]
 rustc-demangle = "0.1"
+
+# crossterm is built from the in-tree copy in vendor/crossterm, patched for size; the version
+# requirement above still applies to it. Rationale and the full change list:
+# vendor/crossterm/LOCAL_PATCH.md.
+[patch.crates-io]
+crossterm = { path = "vendor/crossterm" }

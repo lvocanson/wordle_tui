@@ -13,21 +13,18 @@
 # the previous-run deltas read the same everywhere. Exits non-zero if any step failed, with a
 # summary at the end.
 #
-# Profile = immediate-abort + vendored crossterm (the shipping/measurement profile; see BUILD.md).
-# Both builds go through ./wtui-cargo.sh, so the toolchain pin, the per-platform flags and the
-# vendored-crossterm patch are defined once, there, and never duplicated here.
-# Cargo.lock is rewritten by the patched build (registry -> path); wtui-cargo.sh puts it back, and the
-# trap below is the belt-and-braces version for anything that dies earlier (caveat in
-# vendor/crossterm/LOCAL_PATCH.md).
+# Profile = immediate-abort (the shipping/measurement profile; see BUILD.md). Both builds go
+# through ./wtui-cargo.sh, so the toolchain pin and the per-platform flags are defined once,
+# there, and never duplicated here.
 
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 
-# Restore the lock and drop the log no matter how we exit (build error, Ctrl-C, success).
+# Drop the log no matter how we exit (build error, Ctrl-C, success).
 LOG="$(mktemp)"
-trap 'rm -f "$LOG"; git checkout -- Cargo.lock 2>/dev/null || true' EXIT
+trap 'rm -f "$LOG"' EXIT
 
 # The measurement toolchain is pinned in wtui-cargo.sh (totals are only comparable at equal rustc);
 # bump it there and re-measure the reference totals. Same for the immediate-abort flags, including
@@ -70,11 +67,11 @@ section "WINDOWS BUILD — immediate-abort"
 if try "windows build" bash wtui-cargo.sh build --immediate-abort; then
   grep -iE 'warning|Finished' "$LOG" || true
   # Cargo may print "patch ... was not used in the crate graph" even when the vendored crossterm
-  # IS used (it fires whenever the patched version equals the registry one), so that warning is
+  # IS linked (it fires whenever the patched version equals the registry one), so that warning is
   # not a signal either way. Ground truth: upstream crossterm's NO_COLOR/COLORTERM env-var
-  # strings, verified absent from a patched binary (vendor/crossterm/LOCAL_PATCH.md change 2).
+  # strings, verified absent from the vendored copy (vendor/crossterm/LOCAL_PATCH.md change 2).
   if LC_ALL=C grep -qE 'NO_COLOR|COLORTERM' "$WIN_BIN"; then
-    echo "!! upstream-crossterm marker (NO_COLOR/COLORTERM) found in the binary — vendored patch NOT applied"
+    echo "!! upstream-crossterm marker (NO_COLOR/COLORTERM) found in the binary — vendor/crossterm NOT linked"
     FAILED+=("vendored crossterm check")
   else
     echo "vendored crossterm confirmed (no upstream marker in the binary)"
@@ -100,7 +97,6 @@ if [ "$DO_LINUX" = 1 ]; then
   else
     # Same structure as the Windows steps, run inside WSL: the same wtui-cargo.sh build (it picks the
     # Linux triple and flags up from the host it now runs on), then the same stats.rs reporter.
-    # That build rewrites the same shared Cargo.lock; wtui-cargo.sh restores it, the EXIT trap too.
     wsl.exe -e bash -lc "
       set -u
       cd '$WSL_PATH' || exit 1

@@ -5,8 +5,8 @@
 //! With no argument it reads the freshest of those two; pass a path to pin one, `-n N` for the
 //! list length.
 //!
-//! Why not `cargo bloat`: it re-runs its own build (often without the vendored crossterm patch,
-//! so it measures upstream) and attributes ICF-folded bodies to an arbitrary symbol. The map is
+//! Why not `cargo bloat`: it re-runs its own build instead of reading the link that produced the
+//! shipping binary, and attributes ICF-folded bodies to an arbitrary symbol. The map is
 //! emitted by the very link that produced the shipping binary — emitting it is byte-neutral
 //! (verified: only the 6 link-timestamp bytes differ) — so every size here is ground truth.
 //!

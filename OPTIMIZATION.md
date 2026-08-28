@@ -60,7 +60,7 @@ Each run also records its section sizes in a `.sections` sidecar next to the mea
 The build script runs before linking and cannot see the final binary, which is why this is a post-build tool rather than a `cargo:warning`.
 
 **Full validation run.**
-`tools/validate.sh` does everything in one invocation — tests, the Windows build and its size, the Linux build and size through WSL (both measured with the same `stats.rs` reporter), and the symbol-bloat report over both linker maps (`tools/bloat.rs`) — on the shipping profile (immediate-abort + vendored crossterm).
+`tools/validate.sh` does everything in one invocation — tests, the Windows build and its size, the Linux build and size through WSL (both measured with the same `stats.rs` reporter), and the symbol-bloat report over both linker maps (`tools/bloat.rs`) — on the shipping profile (immediate-abort).
 It exits non-zero with a summary if any step failed.
 Use Git Bash on Windows:
 
@@ -96,7 +96,7 @@ reads the freshest map (pass a path to pin one, `-n N` for the list length) and 
 Crates come from the demangled names — under fat LTO every Rust symbol lands in one object, so object-based attribution is meaningless.
 This method found changes [#24–#26](#changelog).
 
-It replaces **`cargo bloat`**, which had two failure modes, both observed here: identical-code folding made it attribute a folded body to an arbitrary, often-dead symbol name — that is how `supports_ansi` and its `env::var` kept appearing in reports of a binary that does not contain them — and the `--config` crossterm patch was not reliably applied under it, so it frequently measured upstream crossterm instead.
+It replaces **`cargo bloat`**, which had two failure modes, both observed here: identical-code folding made it attribute a folded body to an arbitrary, often-dead symbol name — that is how `supports_ansi` and its `env::var` kept appearing in reports of a binary that does not contain them — and it re-runs its own build rather than reading the link that produced the shipping binary.
 Cargo's *"patch … was not used in the crate graph"* warning is **not** a signal either way — it also fires on correct builds whenever the patched version equals the registry one; `tools/validate.sh` instead probes the built binary for upstream-crossterm markers (`NO_COLOR`/`COLORTERM`) and fails if they are present.
 Confirm any lead by string-probing the binary and by a measured rebuild.
 
@@ -265,7 +265,7 @@ It anchored `std::process::Command`, a `BTreeMap<OsString, OsString>` environmen
 A vendored crossterm with an ioctl-only `size()` drops all of it; `nm` confirms `tput_value`, `Command` and `BTreeMap` are gone.
 Windows is unaffected — its `size()` uses `GetConsoleScreenBufferInfo`.
 
-The patch is **opt-in**, since a `[patch]` cannot be a cargo feature: it is injected with `--config .cargo/crossterm-patch.toml` so a plain `cargo build` stays on upstream.
+The copy is wired in by a `[patch.crates-io]` table in `Cargo.toml`, so every build links it.
 Only crossterm's lib target is built as a dependency, so the vendored copy is trimmed to `src/`, `Cargo.toml`, `LICENSE` and `README.md`.
 Full rationale, wiring and the `Cargo.lock` caveat: [vendor/crossterm/LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md).
 

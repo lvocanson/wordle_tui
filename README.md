@@ -10,7 +10,7 @@ Wordle in the terminal: full-screen board, on-screen keyboard, mouse or keyboard
 </p>
 
 ```bash
-cargo run --release                      # stable, ~160 KB
+cargo run --release                      # stable, ~145 KB
 ./wtui-cargo.sh run --immediate-abort    # nightly, 50 KB — toolchain and flags handled for you
 ```
 
@@ -80,7 +80,7 @@ See [OPTIMIZATION.md](OPTIMIZATION.md) for how the encoding was arrived at.
 | `tools/stats.rs` | compression and binary-size reporter (`cargo run --example stats`) |
 | `tools/validate.sh` | one-shot tests + Windows/Linux builds + size report |
 | `wtui-cargo.sh` | build driver: one command per profile, prerequisites installed on demand |
-| `vendor/crossterm/` | patched crossterm 0.29.0, opt-in (see its `LOCAL_PATCH.md`) |
+| `vendor/crossterm/` | patched crossterm 0.29.0 (see its `LOCAL_PATCH.md`) |
 
 ## Tests
 

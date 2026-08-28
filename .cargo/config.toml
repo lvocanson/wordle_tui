@@ -27,10 +27,7 @@
 # of main.rs (dead weight once panics bypass it). To try it (note: env RUSTFLAGS OVERRIDES the
 # [target] rustflags below, it does not merge — so /OPT:ICF and /DEBUG:NONE must be repeated
 # here or they are lost):
-#   RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clink-arg=/OPT:ICF -Clink-arg=/DEBUG:NONE" cargo +nightly-2026-08-25 build --release --target x86_64-pc-windows-msvc --config .cargo/crossterm-patch.toml
-#
-# The trailing `--config .cargo/crossterm-patch.toml` opts in to the vendored crossterm; drop it to
-# build against upstream. See vendor/crossterm/LOCAL_PATCH.md.
+#   RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clink-arg=/OPT:ICF -Clink-arg=/DEBUG:NONE" cargo +nightly-2026-08-25 build --release --target x86_64-pc-windows-msvc
 #
 # Nightly prerequisite (pinned, see BUILD.md):
 #   rustup toolchain install nightly-2026-08-25 --profile minimal --component rust-src
@@ -61,7 +58,7 @@ rustflags = ["-C", "link-arg=/OPT:ICF", "-C", "link-arg=/DEBUG:NONE"]
 # no `apt install` is needed: `-Zunstable-options -Clinker-features=+lld` selects it, and
 # --icf=all folds. As with the immediate-abort command, an env RUSTFLAGS OVERRIDES this [target]
 # block (it does not merge), so repeat --build-id=none there:
-#   RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none" cargo +nightly-2026-08-25 build --release --target x86_64-unknown-linux-gnu --config .cargo/crossterm-patch.toml
+#   RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none" cargo +nightly-2026-08-25 build --release --target x86_64-unknown-linux-gnu
 # Measured gain is small (~1 KB), matching /OPT:ICF on Windows. --icf=all is aggressive — it folds
 # functions even when their address is taken; harmless here, nothing in the game compares fn ptrs.
 [target.x86_64-unknown-linux-gnu]

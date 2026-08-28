@@ -13,12 +13,12 @@ Three profiles, each with **one command per platform that produces the smallest 
 ```bash
 ./wtui-cargo.sh run                       # stable, host-native (= cargo run --release)
 ./wtui-cargo.sh build --build-std
-./wtui-cargo.sh run --immediate-abort     # + the vendored crossterm: the shipping profile
+./wtui-cargo.sh run --immediate-abort     # the shipping profile
 ./wtui-cargo.sh build --immediate-abort --target x86_64-unknown-linux-musl
 ./wtui-cargo.sh build --build-std -n      # print the cargo command it would run, run nothing
 ```
 
-It installs the pinned nightly **with `rust-src`** and adds a missing `--target`, forwards anything it does not recognise to cargo, and puts `Cargo.lock` back after a vendored-crossterm build. `./wtui-cargo.sh --help` for the rest.
+It installs the pinned nightly **with `rust-src`** and adds a missing `--target`, and forwards anything it does not recognise to cargo. `./wtui-cargo.sh --help` for the rest.
 
 The flags reach cargo through `--config target.<triple>.rustflags=[…]`, which **merges** with the `[target]` blocks of `.cargo/config.toml` — the reason the script never repeats `/OPT:ICF` & co. while the hand-typed `RUSTFLAGS` lines below have to.
 
@@ -35,9 +35,9 @@ rustup toolchain install nightly-2026-08-25 --profile minimal --component rust-s
 
 To bump the pin, change `NIGHTLY` in `wtui-cargo.sh` and the version quoted here, then re-measure the reference totals.
 
-### Vendored crossterm (opt-in, size)
+### Vendored crossterm
 
-Appending **`--config .cargo/crossterm-patch.toml`** to any build command swaps in our vendored crossterm.
+Every profile links the in-tree crossterm from `vendor/crossterm/`, patched for size.
 See `vendor/crossterm/LOCAL_PATCH.md` for more information.
 
 ---
@@ -62,7 +62,7 @@ cargo +nightly-2026-08-25 build --release --target x86_64-pc-windows-msvc
 **immediate-abort:**
 
 ```powershell
-$env:RUSTFLAGS = '-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clink-arg=/OPT:ICF -Clink-arg=/DEBUG:NONE -Clink-arg=/MAP:target/wordle_tui.map'; cargo +nightly-2026-08-25 build --release --target x86_64-pc-windows-msvc --config .cargo/crossterm-patch.toml; Remove-Item Env:RUSTFLAGS
+$env:RUSTFLAGS = '-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clink-arg=/OPT:ICF -Clink-arg=/DEBUG:NONE -Clink-arg=/MAP:target/wordle_tui.map'; cargo +nightly-2026-08-25 build --release --target x86_64-pc-windows-msvc; Remove-Item Env:RUSTFLAGS
 ```
 
 > `RUSTFLAGS` **overrides** the `[target]` block (it does not merge), so `/OPT:ICF` and `/DEBUG:NONE` are repeated in the immediate-abort line.
@@ -93,7 +93,7 @@ RUSTFLAGS="-Zunstable-options -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -C
 
 ```bash
 RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none -Clink-arg=-Wl,-Map=target/wordle_tui-linux.map" \
-  cargo +nightly-2026-08-25 build --release --target x86_64-unknown-linux-gnu --config .cargo/crossterm-patch.toml
+  cargo +nightly-2026-08-25 build --release --target x86_64-unknown-linux-gnu
 ```
 
 > `RUSTFLAGS` **overrides** the `[target]` block, so `--build-id=none` is repeated in every line.
@@ -132,5 +132,5 @@ RUSTFLAGS="-Zunstable-options -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -C
 
 ```bash
 RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none" \
-  cargo +nightly-2026-08-25 build --release --target x86_64-unknown-linux-musl --config .cargo/crossterm-patch.toml
+  cargo +nightly-2026-08-25 build --release --target x86_64-unknown-linux-musl
 ```
