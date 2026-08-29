@@ -16,7 +16,7 @@ panic = "abort"
 overflow-checks = false
 
 [dependencies]
-crossterm = { version = "0.29.0", default-features = false, features = ["windows", "events"] }
+crossterm = "0.29.0"
 
 # Off-tree stats reporter (not built by `cargo build`; run with `cargo run --example stats`).
 # Reads the build's own constants.rs + corpus.bin, so it never links into the game binary.

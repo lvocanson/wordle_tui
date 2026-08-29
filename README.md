@@ -97,8 +97,8 @@ Size is the project's main constraint; the whole record lives in [OPTIMIZATION.m
 | Profile | Windows | Linux (glibc) |
 |---------|--------:|--------------:|
 | First working TUI (baseline) | 396,288 | — |
-| Stable, no prerequisites | 135,680 | 332,752 |
-| `ship`, pinned nightly | **40,448** | 70,808 |
+| Stable, no prerequisites | 135,680 | 331,888 |
+| `ship`, pinned nightly | **39,936** | 70,088 |
 
 Bytes on disk — the size a release asset shows. OPTIMIZATION.md compares un-padded section totals instead, which differ from these by the linker's section padding (and, on musl, by zero-initialized data).
 

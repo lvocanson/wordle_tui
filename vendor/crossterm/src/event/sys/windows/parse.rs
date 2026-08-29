@@ -6,9 +6,7 @@ use winapi::um::{
     winuser::{VK_BACK, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_RETURN, VK_SHIFT, VK_TAB},
 };
 
-use crate::event::{
-    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-};
+use crate::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 
 // LOCAL PATCH — see …LOCAL_PATCH.md: the event set is reduced to what this app consumes — key
 // *presses* (Esc, Enter, Backspace, layout-resolved characters with modifiers), *left-button-down*
@@ -24,11 +22,7 @@ pub(crate) fn handle_mouse_event(
     mouse_event: crossterm_winapi::MouseEvent,
     buttons_pressed: &MouseButtonsPressed,
 ) -> Option<Event> {
-    if let Ok(Some(event)) = parse_mouse_event_record(&mouse_event, buttons_pressed) {
-        return Some(Event::Mouse(event));
-    }
-
-    None
+    parse_mouse_event_record(&mouse_event, buttons_pressed).map(Event::Mouse)
 }
 
 pub(crate) fn handle_key_event(key_event: KeyEventRecord) -> Option<Event> {
@@ -60,7 +54,7 @@ impl From<&ControlKeyState> for KeyModifiers {
 fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<KeyEvent> {
     // LOCAL PATCH — see …LOCAL_PATCH.md: presses only. Upstream keeps releases for the Alt-code
     // exception (an Alt release carrying a u_char); with Alt-code input dropped, releases carry
-    // nothing this app reads, and `KeyEvent::new` defaults the kind to Press.
+    // nothing this app reads.
     if !key_event.key_down {
         return None;
     }
@@ -103,34 +97,24 @@ fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<KeyEvent> {
 fn parse_mouse_event_record(
     event: &crossterm_winapi::MouseEvent,
     buttons_pressed: &MouseButtonsPressed,
-) -> std::io::Result<Option<MouseEvent>> {
-    let modifiers = KeyModifiers::from(&event.control_key_state);
+) -> Option<MouseEvent> {
+    // LOCAL PATCH — see …LOCAL_PATCH.md: only a fresh left-button press becomes an event; the
+    // upstream arms for releases, right/middle buttons, motion/drag and both scroll axes are
+    // gone, and so are the modifier bits the game never reads.
+    match event.event_flags {
+        EventFlags::PressOrRelease | EventFlags::DoubleClick => {}
+        _ => return None,
+    }
 
-    let xpos = event.mouse_position.x as u16;
+    if !event.button_state.left_button() || buttons_pressed.left {
+        return None;
+    }
+
     // LOCAL PATCH — see …LOCAL_PATCH.md: the record's y is absolute in the screen buffer, which
     // upstream corrects by reading the window rect on every mouse event. The alternate screen
     // buffer is exactly window-sized, so its top is always 0 and the correction is the identity.
-    let ypos = event.mouse_position.y as u16;
-
-    let button_state = event.button_state;
-
-    // LOCAL PATCH — see …LOCAL_PATCH.md: only a fresh left-button press becomes an event; the
-    // upstream arms for releases, right/middle buttons, motion/drag and both scroll axes are gone.
-    let kind = match event.event_flags {
-        EventFlags::PressOrRelease | EventFlags::DoubleClick => {
-            if button_state.left_button() && !buttons_pressed.left {
-                Some(MouseEventKind::Down(MouseButton::Left))
-            } else {
-                None
-            }
-        }
-        _ => None,
-    };
-
-    Ok(kind.map(|kind| MouseEvent {
-        kind,
-        column: xpos,
-        row: ypos,
-        modifiers,
-    }))
+    Some(MouseEvent {
+        column: event.mouse_position.x as u16,
+        row: event.mouse_position.y as u16,
+    })
 }

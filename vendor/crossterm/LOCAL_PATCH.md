@@ -1,12 +1,15 @@
 # Vendored crossterm 0.29.0 — local patch
 
-The crates.io source of **crossterm 0.29.0** with eleven targeted changes.
+The crates.io source of **crossterm 0.29.0**, reduced to the code this game links and carrying twelve targeted changes.
 Every patched site carries a `// LOCAL PATCH — see …LOCAL_PATCH.md` marker, so `grep -rn 'LOCAL PATCH' src` lists them all.
+
+Change 12 is the reduction itself: the crate is now the cursor-free, style-free, poll-free subset that `src/main.rs` and `src/ui.rs` actually call, so what remains under `src/` is what the game runs. Changes 1–11 are the size patches inside that subset.
 
 Changes 1–3 rest on the same fact: **this app is single-threaded** — one event-loop thread in `main::run`, no thread is spawned anywhere — so crossterm's global synchronization, and its fallback paths for hostile environments, are pure overhead.
 Changes 4–7 remove what this app never reads: error-message payloads, full-unicode key case mapping, sub-millisecond poll timing, and every event kind the game does not consume.
 Change 8 removes the event queue outright, on the same single-threaded, single-consumer reading of how this app uses the crate.
 Changes 9–11 drop the Windows console abstractions the app does not need: the timeout around a read that already blocks, the keyboard-layout lookup for keys it never reads, and the private `CONOUT$` handle used to correct geometry that the alternate screen already leaves correct.
+Change 12 deletes everything no call path reaches, the earlier changes' own leftovers included.
 
 | # | Change | Patched file | Δ Windows | Δ Linux |
 |---|--------|--------------|----------:|--------:|
@@ -21,13 +24,15 @@ Changes 9–11 drop the Windows console abstractions the app does not need: the 
 | 9 | Blocking console read, no poll | `event/source/windows.rs`, `event.rs` | −136 | 0 |
 | 10 | Key characters without the keyboard layout | `event/sys/windows/parse.rs` | −764 | 0 |
 | 11 | Console geometry without `CONOUT$` | `event/sys/windows/parse.rs`, `terminal/sys/windows.rs` | −440 | 0 |
+| 12 | Unreferenced code deleted | the whole subtree | −376 | +16 *** |
 
 Bytes are un-padded section totals on the immediate-abort profile, the metric [OPTIMIZATION.md](../../OPTIMIZATION.md) compares.
 A `0` marks a platform the change structurally cannot affect (the patched file or branch is for the other platform).
 Changes 2 and 3 remove the same dependency from opposite ends, so their per-platform figures are not independent — see change 3.
-Changes 9 and 10 **supersede earlier changes on Windows**: change 10 deletes the function change 5 patched, and change 9 unlinks the clock change 6 patched and the poll error payload of change 4. Those three patches stay in the tree because Unix still reaches change 4's and change 6's sites; change 5's site no longer exists at all. A re-vendor should apply 4 and 6, and skip 5.
+Changes 9 and 10 **supersede earlier changes**: change 10 deleted the function change 5 patched, and changes 9 and 12 between them removed every caller of the clock change 6 patched, so `event/timeout.rs` is gone. Both changes are therefore history rather than sites in the tree — a re-vendor applies 4, skips 5 and 6, and lets 12 delete the file. Change 4's Unix site is still there.
 `**` Change 8 removes 3,256 shipped bytes on Linux (76,112 → 72,856 B on disk); `.relro_padding` grows by almost as much to keep the page alignment, so the section total only moves −70 B.
 `*` Changes 4–6 were measured on Linux only in aggregate: sections shrink ~430 B (`.text`, `.rodata`, `.eh_frame`, `.rela.dyn`) but RELRO page alignment grows `.relro_padding` by almost exactly that, for a net −1 B total.
+`***` Change 12 removes 704 shipped bytes on Linux (`.text` −564, `.eh_frame` −124, `.eh_frame_hdr` −32, `.rodata` +16) and 720 B on disk; as in change 8, `.relro_padding` grows to keep the page alignment and turns that into +16 B of section total.
 
 ## 1. ioctl-only `terminal::size()`
 
@@ -40,7 +45,7 @@ Measured on Linux (immediate-abort): **118,608 → 89,903 B, −28,705 B (−24%
 Windows is unaffected — its `size()` uses `GetConsoleScreenBufferInfo` and never involved `tput`.
 
 Behaviour changes only on the fallback path: the ioctl always succeeds on a real terminal, so output is identical; if it ever failed, `size()` now returns `Err` (the app exits cleanly) instead of shelling out.
-`tput_size`/`tput_value` are left in the file rather than deleted, to keep the diff to that one return; being unreferenced, they contribute nothing to the binary.
+`tput_size`/`tput_value` are gone with change 12, and `window_size()` — which had no other caller — is folded into `size()`.
 
 ## 2. Event reader without `parking_lot::Mutex`
 
@@ -89,6 +94,8 @@ Measured on Windows (immediate-abort): **64,296 → 57,716 B, −6,580 B**.
 
 ## 5. ASCII-only key case correction
 
+**No site in the tree**: change 10 deleted the function this patched. Kept here for the measurement and for a re-vendor, which should skip it.
+
 `event/sys/windows/parse.rs`, `try_ensure_char_case` — the shift/capslock case fix-up uses `to_ascii_lowercase`/`to_ascii_uppercase` instead of the full-unicode `to_lowercase()`/`to_uppercase()` iterators, whose case-mapping tables cost ~5 KB of `.rdata` + ~1 KB of `.text`.
 Behaviour changes only for non-ASCII keyboard input: such characters now pass through in whatever case the keyboard layout produced instead of being re-cased.
 This game only accepts `is_ascii_alphabetic` input (and lowercases it itself), so the difference is unobservable here.
@@ -96,6 +103,8 @@ This game only accepts `is_ascii_alphabetic` input (and lowercases it itself), s
 Measured on Windows (immediate-abort): **57,716 → 51,608 B, −6,108 B**.
 
 ## 6. Millisecond poll clock
+
+**No site in the tree**: with no caller left that wants a deadline, `event/timeout.rs` is gone (change 12). Kept here for the measurement and for a re-vendor, which should skip it.
 
 `event/timeout.rs` — on Windows, `PollTimeout` stamps `GetTickCount64()` (u64 milliseconds) instead of `Instant`, which there is `QueryPerformanceCounter` behind a `Once`-cached frequency plus 128-bit `Duration` arithmetic.
 Millisecond resolution is exactly what `WaitForMultipleObjects` consumes anyway; Unix keeps `Instant` (a thin `clock_gettime`, nothing to save).
@@ -135,7 +144,7 @@ So the drop rule waits for a CSI final byte (`0x40..=0x7E`) before erroring, `ES
 
 Measured (immediate-abort): **81,599 → 73,415 B, −8,184 B** — far more than on Windows, because `parse_event` was the binary's single largest symbol (4,851 B) and its parameter parsing anchored `FromStr`, `str::split` and `core::fmt` padding on top.
 
-The unused parsers are left in the file, unreferenced, behind a file-level `#![allow(dead_code)]`, so a re-vendor stays a small diff — same reasoning as `tput_value`/`tput_size` in change 1.
+The parsers that reduction stopped reaching are deleted outright (change 12), so what the file contains is what the terminal's bytes actually run through.
 
 
 
@@ -147,22 +156,24 @@ Upstream's two calls are a pump: `poll` asks the source for an event, **queues**
 
 `None` means "no timeout", which is the second half of the change: this app renders on change and only an event changes anything, so upstream's 200 ms poll interval wakes the process up for nothing. Blocking removes `PollTimeout`'s timeout arithmetic from the caller's side and drops the process to zero wakeups while idle.
 
-Windows keeps its source inline in the static (three words). Unix's carries the parser's buffers, so it stays boxed — inlined it would trade a pointer-sized win for ~3 KB of `.bss`. The Unix source can also yield replies to terminal queries this app never sends (cursor position, device attributes); `next` skips them and blocks again.
+Windows keeps its source inline in the static (two words). Unix's carries the parser's buffers, so it stays boxed — inlined it would trade a pointer-sized win for ~3 KB of `.bss`.
 
-Nothing else changes: `poll`, `read`, `InternalEventReader` and the filters stay in the tree, unreferenced, and the linker drops them — same treatment as the unused parsers in change 7, and it keeps a re-vendor a small diff. Verified: reverting `event/read.rs` to the upstream file leaves the binary byte-identical.
+`poll`, `read`, `InternalEventReader`, the filters and the `EventSource` trait are deleted with change 12; each platform's source is called by name through one inherent blocking method. `InternalEvent` goes with them: with the query replies of change 7 no longer decoded, the only thing either parser can produce is an `Event`.
 
 Measured on Windows (immediate-abort): **48,984 → 46,455 B, −2,529 B**, which takes crossterm's own out-of-line symbols from 3,235 B to 59 B.
 `tools/pty_test.sh` passes identically against a control binary built without this change.
 
 ## 9. Blocking console read, no poll
 
-`event/source/windows.rs` — `WindowsEventSource::read_blocking`, called by `event::next` in place of `try_read`, which stays in the file unreferenced.
+`event/source/windows.rs` — `WindowsEventSource::read_blocking`, called by `event::next` in place of upstream's `try_read`.
 
 `ReadConsoleInputW` **already blocks** until a record is available. The `WaitForMultipleObjects` around it, the `GetNumberOfConsoleInputEvents` that follows it, and the `PollTimeout` bookkeeping that drives both exist for exactly one purpose: giving up before an event arrives. Change 8 established that this app never wants that, so the whole wait-count-read sequence collapses to the read.
 
 The chain that comes off with it is longer than the code removed: `WinApiPoll`, `PollTimeout` and its `GetTickCount64` clock, and one `Handle::current_in_handle()` — a `CreateFileW("CONIN$")` plus an `Arc` allocation and a `CloseHandle` — **per event**. Three `kernel32` imports go with them.
 
-The record-to-`Event` match is factored into `to_event` so the unreferenced `try_read` keeps working; the linker drops both it and `WinApiPoll`.
+The record-to-`Event` match sits in its own `to_event`, and `read_blocking` loops on it until a record decodes to something the game reads.
+
+Change 12 applies the same reasoning to Unix, where `read_blocking` polls with no deadline: `PollTimeout` has no caller left on either platform.
 
 Measured on Windows (immediate-abort): **45,567 → 45,431 B, −136 B** (`.text` +96, `.rdata` −228 — the imports).
 
@@ -196,18 +207,35 @@ Measured on Windows (immediate-abort): **45,431 → 44,991 B, −440 B**.
 
 Validated against a control binary built without changes 9–11, driven through a real console (`WriteConsoleInputW` for input, `ReadConsoleOutputCharacterW` for the screen): typing, `Enter`, `Backspace`, an inert `Tab`, a click on an on-screen key and `Ctrl+C` all produce byte-identical screens on both.
 
+## 12. Unreferenced code deleted
+
+Everything no call path from `src/main.rs` reaches is gone from the tree, so reading `src/` shows what the game runs and nothing else. The linker already dropped all of it, which is why the byte figures are small; what they measure is the behaviour that came off with the code, not the code itself.
+
+**Whole modules.** `cursor`, `style`, `clipboard`, `tty` and `ansi_support` — the game writes its own escape bytes and never asks whether ANSI is supported, since both mouse-capture commands answer that question themselves. Inside `event`: the async `stream`, the `filter`s and `read`er that changes 8 and 9 unlinked, `timeout`, the Windows `poll` and the wakers of both platforms. The `use-dev-tty` variants of the Unix source and waker, which were never the selected ones. In `terminal/sys`, the `libc` half of every function that had both a `libc` and a `rustix` spelling.
+
+**Inside the files that stay.** `command.rs` keeps `Command` and `QueueableCommand` — what the `execute!` macro calls — and loses `ExecutableCommand`, `SynchronizedUpdate`, the blanket forward for `&T` and `execute_fmt`; `is_ansi_code_supported` becomes a required method, since the default answered through `ansi_support`. `macros.rs` keeps `csi!`, `queue!` and `execute!`. `terminal.rs` keeps `size()` and, on Unix, the raw-mode pair — Windows raw mode is a side effect of mouse capture, so it has no callers here.
+
+**The event types.** `event.rs` keeps `next`, the two mouse-capture commands, and the shapes the game matches on: `Event` (a key press, a left click or a resize), `KeyEvent`, `KeyCode` limited to Backspace, Enter, Esc and a character, `KeyModifiers` limited to shift, control and alt, and `MouseEvent`, which is a left press at a cell — the parsers of change 7 emit no other button, kind or modifier, so there is no `MouseEventKind` and no `MouseButton`. Gone with them: focus and paste events, key kinds and states, the keyboard enhancement flags, the media and modifier key codes, and every `Display` impl. Two call sites in the game follow: the event loop no longer tests a key kind that could only be `Press`, and its mouse arm no longer destructures a kind and a button that could only be a left press.
+
+**Manifest.** With the optional code gone, the feature flags go too, and with them `parking_lot`, `document-features`, `base64`, `derive_more`, `futures-core`, `serde`, `filedescriptor` and `libc`, plus the examples and dev-dependencies of a crate that is built lib-only. The workspace `Cargo.lock` loses six entries. `bitflags`, `mio`, `rustix`, `signal-hook`, `signal-hook-mio`, `crossterm_winapi` and `winapi` remain.
+
+Measured on Windows (immediate-abort): **37,463 → 37,087 B, −376 B** — the mouse modifier decoding, the key-event kind and state fields, and the narrower match in the event loop.
+On Linux the shipped bytes fall by 704 (70,808 → 70,088 B on disk), mostly the deadline arithmetic the Unix source no longer carries; `.relro_padding` grows to keep the page alignment, so the section total reads **+16 B**.
+`tools/pty_test.sh` passes on Linux and `cargo test` is unchanged.
+
 ## Upgrading crossterm
 
-Moving to a new crossterm is a re-vendor: fetch the new source, copy `src/`, `Cargo.toml`, `LICENSE` and `README.md` over this directory (this file excepted), grep it for the sites listed above and re-apply each change, then bump the version requirement in the workspace `Cargo.toml` to match.
+Moving to a new crossterm is a re-vendor, and change 12 makes it a rewrite rather than a patch: the tree no longer resembles the tarball closely enough to diff against it usefully. Fetch the new source, then work the other way round — take the current tree as the specification of what the game needs, and rebuild it from the new upstream file by file, re-applying changes 1–4 and 7–11 at the sites this file names. `grep -rn 'LOCAL PATCH' src` lists every one of them in place. Bump the version requirement in the workspace `Cargo.toml` to match.
 
-To review the current patch, or to check that a re-vendor left exactly the intended changes, diff against the registry copy:
+The registry copy is still the reference for any single function's upstream shape:
 
 ```bash
-diff -ru ~/.cargo/registry/src/index.crates.io-*/crossterm-0.29.0/src vendor/crossterm/src
+ls -d ~/.cargo/registry/src/index.crates.io-*/crossterm-0.29.0/src
 ```
 
-For 0.29.0 that reports exactly the files listed in the table above (plus `Cargo.toml` byte-identical to upstream apart from line endings); every hunk carries its `LOCAL PATCH` marker.
+`tools/pty_test.sh` (Linux input path) and a console harness driving `WriteConsoleInputW` (Windows input path) are what tell you the result still behaves; `tools/validate.sh` covers the rest.
 
 ## What is kept
 
-Only `src/`, `Cargo.toml`, `LICENSE` and `README.md` are kept from the upstream tarball; examples, docs, benches, tests and build cruft were removed, since crossterm is built lib-only as a dependency.
+Only `src/`, `Cargo.toml` and `LICENSE` are kept from the upstream tarball — crossterm is built lib-only as a dependency, so its examples, docs, benches, tests and build cruft have no role here, and its README describes a crate this copy no longer is.
+`LICENSE` stays because the MIT terms still apply to every line of this subtree.

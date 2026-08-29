@@ -7,8 +7,7 @@
 use std::io::{self, Stdout, Write};
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
 };
 use crossterm::execute;
 use crossterm::terminal;
@@ -25,10 +24,10 @@ use app::App;
 use game::Phase;
 
 // Enable ANSI escape processing on the console, and report whether the escapes we emit will be
-// honoured at all. crossterm normally does this as a side effect of its `supports_ansi()` probe (a
-// `parking_lot::Once` + a `TERM` env read); we call the three console entry points directly, which
-// also keeps crossterm_winapi's Handle/ConsoleMode wrappers (an Arc and two Drop flavours) out of
-// the binary. The handle comes from GetStdHandle rather than CONOUT$ on purpose: a stdout
+// honoured at all. Upstream crossterm does this as a side effect of its `supports_ansi()` probe (a
+// `parking_lot::Once` + a `TERM` env read), which the vendored copy does not carry; we call the
+// three console entry points directly, which also keeps crossterm_winapi's Handle/ConsoleMode
+// wrappers (an Arc and two Drop flavours) out of the binary. The handle comes from GetStdHandle rather than CONOUT$ on purpose: a stdout
 // redirected to a file or a pipe has no screen to draw on, and fails the probe here. Windows-only
 // — other platforms interpret escapes natively.
 #[cfg(windows)]
@@ -119,23 +118,18 @@ fn run(out: &mut Stdout) -> io::Result<()> {
         // Blocks: nothing here runs on a clock, so there is no reason to wake without an event.
         match event::next()? {
             Event::Key(key) => {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
                 dirty = true;
                 if handle_key(&mut app, key) {
                     break;
                 }
             }
             Event::Mouse(m) => {
-                // A click on a key/button hit-tests to the keypress it stands for, then
+                // A left click on a key/button hit-tests to the keypress it stands for, then
                 // runs through the exact same path as a real keypress.
-                if let MouseEventKind::Down(MouseButton::Left) = m.kind {
-                    if let Some(key) = grid.hit_test(m.column as usize, m.row as usize) {
-                        dirty = true;
-                        if handle_key(&mut app, key) {
-                            break;
-                        }
+                if let Some(key) = grid.hit_test(m.column as usize, m.row as usize) {
+                    dirty = true;
+                    if handle_key(&mut app, key) {
+                        break;
                     }
                 }
             }
@@ -144,7 +138,6 @@ fn run(out: &mut Stdout) -> io::Result<()> {
                 out.write_all(b"\x1b[2J")?; // clear screen (crossterm::terminal::Clear(All))
                 dirty = true;
             }
-            _ => {}
         }
     }
 

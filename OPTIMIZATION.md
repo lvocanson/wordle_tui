@@ -1,6 +1,6 @@
 # Binary size optimization
 
-The measured record of shrinking the release binary from **396,288 B** to **40,448 B** on Windows, and the reasoning behind each change.
+The measured record of shrinking the release binary from **396,288 B** to **39,936 B** on Windows, and the reasoning behind each change.
 
 [README.md](README.md) presents the game; **[BUILD.md](BUILD.md) holds the build command for every profile on every platform**.
 This file never repeats a command — it names a profile and reports what it measured.
@@ -12,8 +12,8 @@ This file never repeats a command — it names a profile and reports what it mea
 | Profile | Windows | Linux (glibc) | Linux (musl) |
 |---------|--------:|--------------:|-------------:|
 | Baseline — first crossterm+ratatui TUI | 396,288 | — | — |
-| Stable — no prerequisites, cross-platform | 135,680 (−65.8%) | 332,752 | 426,280 |
-| `ship` — pinned nightly, most aggressive; terminal **not** restored on panic | **40,448** (−89.8%) | 70,808 | 86,008 |
+| Stable — no prerequisites, cross-platform | 135,680 (−65.8%) | 331,888 | 425,416 |
+| `ship` — pinned nightly, most aggressive; terminal **not** restored on panic | **39,936** (−89.9%) | 70,088 | 85,272 |
 
 Caveats on that table, all of them about *when* a number was taken:
 
@@ -23,7 +23,7 @@ Caveats on that table, all of them about *when* a number was taken:
   To compare platforms, re-measure both under the same lever.
   Linux currently runs ~30 KB heavier than Windows, about half of it the `.eh_frame` unwind tables (see [Stuck costs](#stuck-costs)) and most of the rest the Unix input stack — mio, signal-hook and the signal-driven resize path — which has no Windows counterpart.
 
-The embedded corpus accounts for 14,283 B — 35% of the 40,448 B Windows binary, 38% of its section total (the share `tools/stats.rs` prints).
+The embedded corpus accounts for 14,283 B — 36% of the 39,936 B Windows binary, 38% of its section total (the share `tools/stats.rs` prints).
 
 ## How sizes are measured
 
@@ -149,6 +149,7 @@ Each row is explained in the section of the same number below.
 | 35 | Vendored crossterm: blocking console read, no poll | −136 | 0 | 45,431 |
 | 36 | Vendored crossterm: console geometry without `CONOUT$` | −440 | 0 | 44,991 |
 | 37 | `#![no_main]`: the process starts without Rust's runtime | −7,528 | −4,130 | 37,463 |
+| 38 | Vendored crossterm: unreferenced code deleted | −376 | +16 | 37,087 |
 
 ### 1 — Base-26 word packing
 
@@ -268,7 +269,7 @@ A vendored crossterm with an ioctl-only `size()` drops all of it; `nm` confirms 
 Windows is unaffected — its `size()` uses `GetConsoleScreenBufferInfo`.
 
 The copy is wired in by a `[patch.crates-io]` table in `Cargo.toml`, so every build links it.
-Only crossterm's lib target is built as a dependency, so the vendored copy is trimmed to `src/`, `Cargo.toml`, `LICENSE` and `README.md`.
+Only crossterm's lib target is built as a dependency, so the vendored copy is trimmed to `src/`, `Cargo.toml` and `LICENSE`.
 Full rationale, wiring and the `Cargo.lock` caveat: [vendor/crossterm/LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md).
 
 ### 14 — Decoder without per-word heap `Vec`
@@ -477,7 +478,7 @@ Changes 33–36 were validated against a control binary built without them, driv
 
 An empty `fn main() {}` on this profile is **19,456 B**. Nothing in it is the program: it is `std::rt`'s entry path, `lang_start`, which wraps the real `main` in `rt::init` and `rt::cleanup` — and on MSVC the C runtime's startup underneath that.
 
-Neither does anything this game needs. `rt::init` installs a stack-guard page for the main thread, records thread identity, and on Linux stores the `argc`/`argv` that back `env::args`; `rt::cleanup` flushes stdout at exit. There is no recursion in the tree and no live `thread::spawn` (crossterm's is behind the disabled `event-stream` feature), so nothing can overflow the stack or ask for a thread name; no code reads an argument; and `restore_terminal` already flushes.
+Neither does anything this game needs. `rt::init` installs a stack-guard page for the main thread, records thread identity, and on Linux stores the `argc`/`argv` that back `env::args`; `rt::cleanup` flushes stdout at exit. There is no recursion in the tree and no `thread::spawn` anywhere, so nothing can overflow the stack or ask for a thread name; no code reads an argument; and `restore_terminal` already flushes.
 
 `#![no_main]` replaces that entry, and the two platforms sit at different depths:
 
@@ -493,6 +494,16 @@ The Windows depth has three consequences, all checked rather than assumed:
 `no_main` and both entry points are `cfg(not(test))`: a `cargo test` build of a bin target needs the harness's own `main`, and suppressing it makes the test link fail. The link args stay unconditional — with the CRT startup back in the picture, `/ENTRY:mainCRTStartup` simply names the CRT's own.
 
 Verified on both platforms against a control binary: Windows through the console harness (typing, `Enter`, `Backspace`, an inert `Tab`, a click on an on-screen key, `Ctrl+C`) with byte-identical screens, plus the redirected-stdout and no-console startups still exiting 0 without writing; Linux through `tools/pty_test.sh`, 11/11. Both the stable and ship profiles build on both platforms.
+
+### 38 — Vendored crossterm: unreferenced code deleted
+
+Not a size change in intent — a readability one. Every earlier vendored-crossterm change left its unused halves in the tree so a re-vendor would stay a small diff, and the crate still carried `cursor`, `style`, `clipboard`, `tty`, the event queue, the async stream and both platforms' wakers, none of which the game calls. All of it is deleted, along with the feature flags that gated it and the eight optional dependencies behind them ([LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md) change 12).
+
+The linker had already dropped every byte of it, so what the figures measure is the behaviour that came off with the code: the mouse modifier bits Windows decoded per click, the key-event kind and state fields, and the deadline arithmetic the Unix source carried into every poll. Windows **−376 B**; Linux ships 704 B fewer (70,808 → 70,088 B on disk) but reads **+16 B** of section total, `.relro_padding` having grown to keep the page alignment — the same accounting as [#32](#32--vendored-crossterm-blocking-event-source-no-queue).
+
+The cost is the re-vendor: the tree no longer diffs usefully against the tarball, so a crossterm upgrade means rebuilding this subset from the new source rather than re-applying a patch. LOCAL_PATCH.md names every site it needs.
+
+`tools/pty_test.sh` passes 11/11 and `cargo test` is unchanged; two call sites in `main.rs` follow the narrower event types.
 
 
 ## Rejected experiments
