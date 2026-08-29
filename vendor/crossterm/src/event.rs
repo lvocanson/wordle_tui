@@ -163,6 +163,72 @@ pub(crate) fn lock_internal_event_reader() -> &'static mut InternalEventReader {
     unsafe { (*INTERNAL_EVENT_READER.0.get()).get_or_insert_with(InternalEventReader::default) }
 }
 
+/// The platform's event source, named concretely rather than held behind `Box<dyn EventSource>`.
+/// Windows' source is three words and lives in the static; Unix's carries the parser's buffers, so
+/// it stays boxed — inline it would put ~3 KB of `.bss` behind a pointer-sized win.
+#[cfg(windows)]
+type PlatformSource = crate::event::source::windows::WindowsEventSource;
+#[cfg(unix)]
+type PlatformSource = Box<crate::event::source::unix::UnixInternalEventSource>;
+
+struct EventSourceCell(UnsafeCell<Option<PlatformSource>>);
+// SAFETY: same single-thread invariant as `EventReaderCell` above.
+unsafe impl Sync for EventSourceCell {}
+static EVENT_SOURCE: EventSourceCell = EventSourceCell(UnsafeCell::new(None));
+
+fn event_source() -> std::io::Result<&'static mut PlatformSource> {
+    // SAFETY: single-threaded access with no reentrancy — `next` is the only caller and the
+    // source's `try_read` never re-enters it, so no `&mut` alias is ever live at once.
+    let slot = unsafe { &mut *EVENT_SOURCE.0.get() };
+    if slot.is_none() {
+        #[cfg(windows)]
+        let source = crate::event::source::windows::WindowsEventSource::new()?;
+        #[cfg(unix)]
+        let source = Box::new(crate::event::source::unix::UnixInternalEventSource::new()?);
+        *slot = Some(source);
+    }
+
+    // LOCAL PATCH — see …LOCAL_PATCH.md: no message payload.
+    slot.as_mut()
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::Other))
+}
+
+/// Blocks until the next [`Event`] arrives.
+///
+/// LOCAL PATCH — see vendor/crossterm/LOCAL_PATCH.md. Upstream splits this into `poll` (which
+/// decodes an event and queues it) and `read` (which takes it back out); the queue, the `Filter`
+/// trait and the `Box<dyn EventSource>` exist only to carry the event between the two. The event
+/// source already blocks and returns one event, so this hands its result straight to the caller.
+/// There is no timeout because the app has nothing to do between events: it renders on change,
+/// and only an event changes anything.
+#[cfg(windows)]
+pub fn next() -> std::io::Result<Event> {
+    use crate::event::source::EventSource;
+
+    let source = event_source()?;
+    loop {
+        // `None` is "no timeout", so `try_read` only returns on an event — but it is still an
+        // `Option`, and a spurious `None` costs one more blocking call rather than a wrong event.
+        if let Some(InternalEvent::Event(event)) = source.try_read(None)? {
+            return Ok(event);
+        }
+    }
+}
+
+/// Unix counterpart: the source also yields replies to terminal queries this app never sends,
+/// which are skipped the same way.
+#[cfg(unix)]
+pub fn next() -> std::io::Result<Event> {
+    use crate::event::source::EventSource;
+
+    let source = event_source()?;
+    loop {
+        if let Some(InternalEvent::Event(event)) = source.try_read(None)? {
+            return Ok(event);
+        }
+    }
+}
+
 /// Checks if there is an [`Event`](enum.Event.html) available.
 ///
 /// Returns `Ok(true)` if an [`Event`](enum.Event.html) is available otherwise it returns `Ok(false)`.

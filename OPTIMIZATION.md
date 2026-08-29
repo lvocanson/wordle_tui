@@ -18,7 +18,7 @@ That fell at change [#2](#changelog); the work continued from there.
 | Baseline — first crossterm+ratatui TUI | 396,288 | — | — |
 | Stable — no prerequisites, cross-platform | 214,016 (−46.0%) | 418,184 | 505,872 |
 | `build-std` — nightly, std without `backtrace`; terminal still restored on panic | 117,248 (−70.4%) | 184,760 | 279,568 |
-| `immediate-abort` — nightly, most aggressive; terminal **not** restored on panic | **49,126** (−87.6%) | 73,415 | 148,784 |
+| `immediate-abort` — nightly, most aggressive; terminal **not** restored on panic | **46,455** (−88.3%) | 73,345 | 148,784 |
 
 Caveats on that table, all of them about *when* a number was taken:
 
@@ -147,6 +147,8 @@ Each row is explained in the section of the same number below.
 | 28 | Vendored crossterm: event set reduced to the game's inputs | −1,716 | 0 | 49,182 |
 | 29 | `ui::draw_board`/`draw_keyboard` outlined | −56 | — | 49,126 |
 | 30 | Vendored crossterm: the same event-set reduction on Unix | 0 | −8,184 | 49,126 |
+| 31 | VT enabling doubles as a startup probe | −142 | — | 48,984 |
+| 32 | Vendored crossterm: blocking event source, no queue | −2,529 | −70 | 46,455 |
 
 ### 1 — Base-26 word packing
 
@@ -254,7 +256,7 @@ On Windows that reclaims two things:
   Each command compiled *both* an ANSI and a WinAPI path, selected at runtime by `supports_ansi()`, so both were linked.
 
 Mouse capture **stays** on crossterm: on Windows `EnableMouseCapture` is WinAPI-only, because the console event source reads mouse input from the input buffer rather than from ANSI reports, so the `?1000h…` sequences would not work.
-Since we no longer call `supports_ansi()` (which enabled VT as a side effect), `init_terminal` sets `ENABLE_VIRTUAL_TERMINAL_PROCESSING` itself through `crossterm_winapi` — already a transitive dependency of crossterm on Windows, so zero graph cost.
+Since we no longer call `supports_ansi()` (which enabled VT as a side effect), `init_terminal` sets `ENABLE_VIRTUAL_TERMINAL_PROCESSING` itself, through a three-function `extern "system"` block (`GetStdHandle` / `GetConsoleMode` / `SetConsoleMode`) rather than `crossterm_winapi`'s `Handle` + `ConsoleMode` wrappers: those carry an `Arc` and two `Drop` flavours, and `Handle::current_out_handle()` reaches the console through `CreateFileW("CONOUT$")` with its UTF-16 path. Going direct is **-142 B** and doubles as the startup probe — the standard output handle fails `GetConsoleMode` when stdout is a file or a pipe, and an old console fails `SetConsoleMode`; in both cases no escape we emit would be honoured, so `init_terminal` refuses and `main` exits silently instead of painting the user's terminal with escape bytes.
 
 Linux is byte-neutral (+15 B): crossterm already emits ANSI there and `supports_ansi` is Windows-only, so there was no second path to reclaim.
 
@@ -420,6 +422,25 @@ bash tools/pty_test.sh target/x86_64-unknown-linux-gnu/release/wordle_tui
 Run it against a **control** binary built from the previous commit too — that is what makes the output readable.
 On a first attempt three checks failed on *both* binaries: the pty line discipline was eating CR (`ICRNL`) and `0x03` (`ISIG`) before the app switched to raw mode — an artefact of the harness, not a regression, fixed by delaying the input.
 A patch is a regression only when the two runs differ.
+
+
+### 31 — VT enabling doubles as a startup probe
+
+`enable_vt` ignored its result and reached the console through `crossterm_winapi`'s `Handle`/`ConsoleMode` (an `Arc`, two `Drop` flavours, and `CreateFileW("CONOUT$")` with its UTF-16 path).
+It is now a three-function `extern "system"` block on `GetStdHandle`/`GetConsoleMode`/`SetConsoleMode`, and its `bool` gates `init_terminal`.
+The handle choice is the point: `CONOUT$` succeeds even when stdout is redirected to a file or a pipe, `GetStdHandle` does not — so the same call that enables ANSI also answers "is there a screen to draw on?".
+Failing it, `main` exits silently instead of painting escape bytes into a terminal that will not honour them, or running invisibly against a redirected stdout. Going direct pays for itself: **−142 B**.
+Unix has no equivalent probe here; a redirected stdout still runs blind there, since `enable_raw_mode` goes through `/dev/tty`.
+
+### 32 — Vendored crossterm: blocking event source, no queue
+
+`poll` + `read` is a pump: `poll` pulls an event from the source, queues it, and reports that one exists; `read` takes it back out. The `VecDeque`, the `Vec` of filtered-out events, the `Filter` trait, `InternalEventReader` and the `Box<dyn EventSource>` all exist only to carry the event between those two calls, and `EventSource::try_read` already returns `Result<Option<InternalEvent>>` — one call, one event.
+`event::next()` blocks on the source held in a static of its concrete type and returns the event ([LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md) change 8).
+The 200 ms poll interval went with it: `run` renders on change and only an event changes anything, so the wakeups did nothing. The loop now blocks, and the process is idle between keystrokes.
+Crossterm's own out-of-line symbols drop from 3,235 B to 59 B; the rest is inlined into `run`.
+
+A queue-shaped middle step (a fixed-size ring replacing the `VecDeque`) was measured on the way and is not kept: it bought −1,141 B, all of which this change subsumes. Reverting `event/read.rs` to the upstream file with change 32 in place leaves the binary byte-identical, so the fork carries no queue patch at all.
+
 
 ## Rejected experiments
 

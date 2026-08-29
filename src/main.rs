@@ -1,5 +1,4 @@
 use std::io::{self, Stdout, Write};
-use std::time::Duration;
 
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -17,26 +16,38 @@ mod words;
 use app::App;
 use game::Phase;
 
-// Enable ANSI escape processing on the console. crossterm normally does this as a side effect of
-// its `supports_ansi()` probe (a `parking_lot::Once` + a `TERM` env read); since we emit our own
-// escape sequences we enable it directly and drop that machinery. Windows-only — other platforms
-// interpret escapes natively.
+// Enable ANSI escape processing on the console, and report whether the escapes we emit will be
+// honoured at all. crossterm normally does this as a side effect of its `supports_ansi()` probe (a
+// `parking_lot::Once` + a `TERM` env read); we call the three console entry points directly, which
+// also keeps crossterm_winapi's Handle/ConsoleMode wrappers (an Arc and two Drop flavours) out of
+// the binary. The handle comes from GetStdHandle rather than CONOUT$ on purpose: a stdout
+// redirected to a file or a pipe has no screen to draw on, and fails the probe here. Windows-only
+// — other platforms interpret escapes natively.
 #[cfg(windows)]
-fn enable_vt() {
-    use crossterm_winapi::{ConsoleMode, Handle};
+fn enable_vt() -> bool {
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
     const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
-    if let Ok(handle) = Handle::current_out_handle() {
-        let mode = ConsoleMode::from(handle);
-        if let Ok(current) = mode.mode() {
-            let _ = mode.set_mode(current | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-        }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(which: u32) -> isize;
+        fn GetConsoleMode(handle: isize, mode: *mut u32) -> i32;
+        fn SetConsoleMode(handle: isize, mode: u32) -> i32;
+    }
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        let mut mode = 0;
+        GetConsoleMode(handle, &mut mode) != 0
+            && SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
     }
 }
 
 fn init_terminal() -> io::Result<Stdout> {
-    enable_raw_mode()?;
+    // Probed before raw mode so there is nothing to undo when it fails.
     #[cfg(windows)]
-    enable_vt();
+    if !enable_vt() {
+        return Err(io::ErrorKind::Unsupported.into());
+    }
+    enable_raw_mode()?;
     let mut stdout = io::stdout();
     // Enter the alternate screen (?1049h), set the window title (OSC 0), and hide the cursor
     // (?25l) as raw ANSI rather than through crossterm's commands: those route via `supports_ansi`
@@ -86,36 +97,35 @@ fn run(out: &mut Stdout) -> io::Result<()> {
             dirty = false;
         }
 
-        if event::poll(Duration::from_millis(200))? {
-            match event::read()? {
-                Event::Key(key) => {
-                    if key.kind != KeyEventKind::Press {
-                        continue;
-                    }
-                    dirty = true;
-                    if handle_key(&mut app, key) {
-                        break;
-                    }
+        // Blocks: nothing here runs on a clock, so there is no reason to wake without an event.
+        match event::next()? {
+            Event::Key(key) => {
+                if key.kind != KeyEventKind::Press {
+                    continue;
                 }
-                Event::Mouse(m) => {
-                    // A click on a key/button hit-tests to the keypress it stands for, then
-                    // runs through the exact same path as a real keypress.
-                    if let MouseEventKind::Down(MouseButton::Left) = m.kind {
-                        if let Some(key) = grid.hit_test(m.column as usize, m.row as usize) {
-                            dirty = true;
-                            if handle_key(&mut app, key) {
-                                break;
-                            }
+                dirty = true;
+                if handle_key(&mut app, key) {
+                    break;
+                }
+            }
+            Event::Mouse(m) => {
+                // A click on a key/button hit-tests to the keypress it stands for, then
+                // runs through the exact same path as a real keypress.
+                if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                    if let Some(key) = grid.hit_test(m.column as usize, m.row as usize) {
+                        dirty = true;
+                        if handle_key(&mut app, key) {
+                            break;
                         }
                     }
                 }
-                Event::Resize(w, h) => {
-                    size = (w, h);
-                    out.write_all(b"\x1b[2J")?; // clear screen (crossterm::terminal::Clear(All))
-                    dirty = true;
-                }
-                _ => {}
             }
+            Event::Resize(w, h) => {
+                size = (w, h);
+                out.write_all(b"\x1b[2J")?; // clear screen (crossterm::terminal::Clear(All))
+                dirty = true;
+            }
+            _ => {}
         }
     }
 

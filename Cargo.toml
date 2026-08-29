@@ -18,12 +18,6 @@ overflow-checks = false
 [dependencies]
 crossterm = { version = "0.29.0", default-features = false, features = ["windows", "events"] }
 
-# Windows-only: lets us enable VT (ANSI) processing on the console ourselves (see main::enable_vt),
-# so rendering can emit raw escapes without crossterm's per-command ANSI/WinAPI dispatch. Already a
-# transitive dep of crossterm on Windows, so it adds nothing to the dependency graph.
-[target.'cfg(windows)'.dependencies]
-crossterm_winapi = "0.9.1"
-
 # Off-tree stats reporter (not built by `cargo build`; run with `cargo run --example stats`).
 # Reads the build's own constants.rs + corpus.bin, so it never links into the game binary.
 [[example]]

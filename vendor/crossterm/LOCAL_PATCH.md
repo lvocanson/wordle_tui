@@ -1,10 +1,11 @@
 # Vendored crossterm 0.29.0 — local patch
 
-The crates.io source of **crossterm 0.29.0** with seven targeted changes.
+The crates.io source of **crossterm 0.29.0** with eight targeted changes.
 Every patched site carries a `// LOCAL PATCH — see …LOCAL_PATCH.md` marker.
 
 Changes 1–3 rest on the same fact: **this app is single-threaded** — one event-loop thread in `main::run`, no thread is spawned anywhere — so crossterm's global synchronization, and its fallback paths for hostile environments, are pure overhead.
 Changes 4–7 remove what this app never reads: error-message payloads, full-unicode key case mapping, sub-millisecond poll timing, and every event kind the game does not consume.
+Change 8 removes the event queue outright, on the same single-threaded, single-consumer reading of how this app uses the crate.
 
 | # | Change | Patched file | Δ Windows | Δ Linux |
 |---|--------|--------------|----------:|--------:|
@@ -15,10 +16,12 @@ Changes 4–7 remove what this app never reads: error-message payloads, full-uni
 | 5 | ASCII-only key case correction | `event/sys/windows/parse.rs` | −6,108 | 0 |
 | 6 | Millisecond poll clock | `event/timeout.rs` | −534 | 0 |
 | 7 | Event set reduced to the game's inputs | `event/source/windows.rs`, `event/sys/windows/parse.rs`, `event/sys/unix/parse.rs` | −1,716 | −8,184 |
+| 8 | Blocking event source, no queue | `event.rs` | −2,529 | −70 ** |
 
 Bytes are un-padded section totals on the immediate-abort profile, the metric [OPTIMIZATION.md](../../OPTIMIZATION.md) compares.
 A `0` marks a platform the change structurally cannot affect (the patched file or branch is for the other platform).
 Changes 2 and 3 remove the same dependency from opposite ends, so their per-platform figures are not independent — see change 3.
+`**` Change 8 removes 3,256 shipped bytes on Linux (76,112 → 72,856 B on disk); `.relro_padding` grows by almost as much to keep the page alignment, so the section total only moves −70 B.
 `*` Changes 4–6 were measured on Linux only in aggregate: sections shrink ~430 B (`.text`, `.rodata`, `.eh_frame`, `.rela.dyn`) but RELRO page alignment grows `.relro_padding` by almost exactly that, for a net −1 B total.
 
 ## 1. ioctl-only `terminal::size()`
@@ -135,6 +138,23 @@ So the drop rule waits for a CSI final byte (`0x40..=0x7E`) before erroring, `ES
 Measured (immediate-abort): **81,599 → 73,415 B, −8,184 B** — far more than on Windows, because `parse_event` was the binary's single largest symbol (4,851 B) and its parameter parsing anchored `FromStr`, `str::split` and `core::fmt` padding on top.
 
 The unused parsers are left in the file, unreferenced, behind a file-level `#![allow(dead_code)]`, so a re-vendor stays a small diff — same reasoning as `tput_value`/`tput_size` in change 1.
+
+
+
+## 8. Blocking event source, no queue
+
+`event.rs` — a single `event::next() -> io::Result<Event>` that blocks on the platform's event source, replacing the `poll` + `read` pair for this app.
+
+Upstream's two calls are a pump: `poll` asks the source for an event, **queues** it, and answers "yes there is one"; `read` then takes it back out. Everything between them exists to carry that event across the two calls — a `VecDeque` plus a `Vec` of filtered-out events, the `Filter` trait, `InternalEventReader`, and a `Box<dyn EventSource>` behind a static. But `EventSource::try_read` already returns `Result<Option<InternalEvent>>`: one call, one event. `next` holds the source in a static named by its **concrete** type (no vtable), calls `try_read(None)` and hands the `InternalEvent::Event` payload straight back.
+
+`None` means "no timeout", which is the second half of the change: this app renders on change and only an event changes anything, so the old 200 ms poll interval woke the process up for nothing. Blocking removes `PollTimeout`'s timeout arithmetic from the caller's side and drops the process to zero wakeups while idle.
+
+Windows keeps its source inline in the static (three words). Unix's carries the parser's buffers, so it stays boxed — inlined it would trade a pointer-sized win for ~3 KB of `.bss`. The Unix source can also yield replies to terminal queries this app never sends (cursor position, device attributes); `next` skips them and blocks again.
+
+Nothing else changes: `poll`, `read`, `InternalEventReader` and the filters stay in the tree, unreferenced, and the linker drops them — same treatment as the unused parsers in change 7, and it keeps a re-vendor a small diff. Verified: reverting `event/read.rs` to the upstream file leaves the binary byte-identical.
+
+Measured on Windows (immediate-abort): **48,984 → 46,455 B, −2,529 B**, which takes crossterm's own out-of-line symbols from 3,235 B to 59 B.
+`tools/pty_test.sh` passes identically against a control binary built without this change.
 
 ## Upgrading crossterm
 
