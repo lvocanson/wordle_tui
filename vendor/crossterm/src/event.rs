@@ -203,13 +203,11 @@ fn event_source() -> std::io::Result<&'static mut PlatformSource> {
 /// and only an event changes anything.
 #[cfg(windows)]
 pub fn next() -> std::io::Result<Event> {
-    use crate::event::source::EventSource;
-
     let source = event_source()?;
     loop {
-        // `None` is "no timeout", so `try_read` only returns on an event — but it is still an
-        // `Option`, and a spurious `None` costs one more blocking call rather than a wrong event.
-        if let Some(InternalEvent::Event(event)) = source.try_read(None)? {
+        // The console read blocks on its own; records the app does not read (key releases, other
+        // mouse kinds) come back as `None` and simply cost another blocking read.
+        if let Some(event) = source.read_blocking()? {
             return Ok(event);
         }
     }
@@ -326,8 +324,9 @@ pub(crate) fn poll_internal<F>(timeout: Option<Duration>, filter: &F) -> std::io
 where
     F: Filter,
 {
-    // No lock to contend for (single-threaded, see EventReaderCell), so the full timeout is always
-    // available to the poll itself.
+    // LOCAL PATCH — see …LOCAL_PATCH.md: upstream spends part of the timeout acquiring the reader
+    // (`try_lock_internal_event_reader_for`) and gives up if it cannot. With no lock to contend
+    // for, the full timeout always reaches the poll itself.
     let reader = lock_internal_event_reader();
     reader.poll(timeout, filter)
 }

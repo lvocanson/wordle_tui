@@ -5,7 +5,9 @@ use crossterm::event::{
     KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::execute;
-use crossterm::terminal::{self, disable_raw_mode, enable_raw_mode};
+use crossterm::terminal;
+#[cfg(unix)]
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 mod app;
 mod codec;
@@ -42,11 +44,18 @@ fn enable_vt() -> bool {
 }
 
 fn init_terminal() -> io::Result<Stdout> {
-    // Probed before raw mode so there is nothing to undo when it fails.
+    // Probed first so there is nothing to undo when it fails.
     #[cfg(windows)]
     if !enable_vt() {
         return Err(io::ErrorKind::Unsupported.into());
     }
+    // Windows has no `enable_raw_mode()` here on purpose: on that platform raw mode is a set of
+    // bits in the console *input* mode, and `EnableMouseCapture` below assigns that mode whole
+    // (mouse + window + extended flags, everything else cleared) rather than OR-ing into it. The
+    // raw-mode call three lines earlier would be overwritten by it — the pair costs two handle
+    // opens and two mode round-trips for an effect that never survives. Unix raw mode is termios,
+    // untouched by the mouse sequences, so it stays.
+    #[cfg(unix)]
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     // Enter the alternate screen (?1049h), set the window title (OSC 0), and hide the cursor
@@ -55,17 +64,21 @@ fn init_terminal() -> io::Result<Stdout> {
     // ANSI. No SetSize: the layout adapts to whatever size the terminal is (see ui::build_grid),
     // and forcing a resize corrupts the alternate screen's cursor restore. ?1049 keeps it clean.
     stdout.write_all(b"\x1b[?1049h\x1b]0;Wordle\x07\x1b[?25l")?;
-    // Mouse capture stays on crossterm: on Windows it must enable ENABLE_MOUSE_INPUT via WinAPI
+    // Mouse capture stays on crossterm: on Windows it must set ENABLE_MOUSE_INPUT via WinAPI
     // (the console event source reads mouse from the input buffer, not from ANSI reports), which
-    // the ANSI `?1000h`… sequences would not do; on Unix crossterm emits those same sequences.
+    // the ANSI `?1000h`… sequences would not do — and that same call is what puts the console in
+    // raw mode, see above. On Unix crossterm emits those sequences.
     execute!(stdout, EnableMouseCapture)?;
     stdout.flush()?;
     Ok(stdout)
 }
 
 fn restore_terminal() {
+    #[cfg(unix)]
     let _ = disable_raw_mode();
     let mut stdout = io::stdout();
+    // On Windows this restores the console input mode captured before mouse capture — which is
+    // the mode the process started with, raw-mode bits included.
     let _ = execute!(stdout, DisableMouseCapture);
     // Show the cursor (?25h) and leave the alternate screen (?1049l): mirror of init_terminal.
     let _ = stdout.write_all(b"\x1b[?25h\x1b[?1049l");

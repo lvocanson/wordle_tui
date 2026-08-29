@@ -31,6 +31,8 @@ use std::{
 // LOCAL PATCH — see vendor/crossterm/LOCAL_PATCH.md. Upstream guards this behind a
 // `parking_lot::Mutex`; this app is single-threaded (one event-loop thread), so a bare cell drops
 // `parking_lot`/`parking_lot_core` — the analogue of the event-reader patch, for the Linux side.
+// `lock()` hands back the `&mut` directly instead of a guard, so the call sites below bind it
+// without `mut`; those one-word bindings are the only other difference from upstream in this file.
 struct RawModeCell(UnsafeCell<Option<Termios>>);
 // SAFETY: touched only from the single thread that enables/disables raw mode; `Sync` is required
 // only to place it in a `static`.

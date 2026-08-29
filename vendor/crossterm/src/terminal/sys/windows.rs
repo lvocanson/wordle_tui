@@ -6,7 +6,14 @@ use std::io::{self};
 use crossterm_winapi::{Console, ConsoleMode, Coord, Handle, ScreenBuffer, Size};
 use winapi::{
     shared::minwindef::DWORD,
-    um::wincon::{SetConsoleTitleW, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT},
+    um::{
+        processenv::GetStdHandle,
+        winbase::STD_OUTPUT_HANDLE,
+        wincon::{
+            GetConsoleScreenBufferInfo, SetConsoleTitleW, CONSOLE_SCREEN_BUFFER_INFO,
+            ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
+        },
+    },
 };
 
 use crate::{
@@ -52,12 +59,23 @@ pub(crate) fn disable_raw_mode() -> std::io::Result<()> {
     Ok(())
 }
 
+// LOCAL PATCH — see …LOCAL_PATCH.md: read the window rect straight off the standard output
+// handle. `ScreenBuffer::current()` opens CONOUT$ with `CreateFileW` and wraps it in a refcounted,
+// self-closing `Handle` so it stays valid for an arbitrary lifetime; this is one call on a handle
+// the process already owns, and the app has already established that it is a console.
 pub(crate) fn size() -> io::Result<(u16, u16)> {
-    let terminal_size = ScreenBuffer::current()?.info()?.terminal_size();
+    let mut info: CONSOLE_SCREEN_BUFFER_INFO = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &mut info)
+    };
+    if ok == 0 {
+        return Err(io::Error::from(io::ErrorKind::Other));
+    }
+    let window = info.srWindow;
     // windows starts counting at 0, unix at 1, add one to replicated unix behaviour.
     Ok((
-        (terminal_size.width + 1) as u16,
-        (terminal_size.height + 1) as u16,
+        (window.Right - window.Left + 1) as u16,
+        (window.Bottom - window.Top + 1) as u16,
     ))
 }
 

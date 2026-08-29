@@ -1,13 +1,9 @@
-use crossterm_winapi::{ControlKeyState, EventFlags, KeyEventRecord, ScreenBuffer};
+use crossterm_winapi::{ControlKeyState, EventFlags, KeyEventRecord};
 use winapi::um::{
     wincon::{
-        CAPSLOCK_ON, LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED, RIGHT_ALT_PRESSED, RIGHT_CTRL_PRESSED,
-        SHIFT_PRESSED,
+        LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED, RIGHT_ALT_PRESSED, RIGHT_CTRL_PRESSED, SHIFT_PRESSED,
     },
-    winuser::{
-        GetForegroundWindow, GetKeyboardLayout, GetWindowThreadProcessId, ToUnicodeEx, VK_BACK,
-        VK_CONTROL, VK_ESCAPE, VK_MENU, VK_RETURN, VK_SHIFT,
-    },
+    winuser::{VK_BACK, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_RETURN, VK_SHIFT, VK_TAB},
 };
 
 use crate::event::{
@@ -61,93 +57,6 @@ impl From<&ControlKeyState> for KeyModifiers {
     }
 }
 
-enum CharCase {
-    LowerCase,
-    UpperCase,
-}
-
-// LOCAL PATCH — see …LOCAL_PATCH.md: ASCII-only case correction. Upstream uses the full unicode
-// `to_lowercase`/`to_uppercase` iterators, anchoring the case-conversion tables; non-ASCII chars
-// now pass through in the case the keyboard layout produced.
-fn try_ensure_char_case(ch: char, desired_case: CharCase) -> char {
-    match desired_case {
-        CharCase::LowerCase => ch.to_ascii_lowercase(),
-        CharCase::UpperCase => ch.to_ascii_uppercase(),
-    }
-}
-
-// Attempts to return the character for a key event accounting for the user's keyboard layout.
-// The returned character (if any) is capitalized (if applicable) based on shift and capslock state.
-// Returns None if the key doesn't map to a character or if it is a dead key.
-// We use the *currently* active keyboard layout (if it can be determined). This layout may not
-// correspond to the keyboard layout that was active when the user typed their input, since console
-// applications get their input asynchronously from the terminal. By the time a console application
-// can process a key input, the user may have changed the active layout. In this case, the character
-// returned might not correspond to what the user expects, but there is no way for a console
-// application to know what the keyboard layout actually was for a key event, so this is our best
-// effort. If a console application processes input in a timely fashion, then it is unlikely that a
-// user has time to change their keyboard layout before a key event is processed.
-fn get_char_for_key(key_event: &KeyEventRecord) -> Option<char> {
-    let virtual_key_code = key_event.virtual_key_code as u32;
-    let virtual_scan_code = key_event.virtual_scan_code as u32;
-    let key_state = [0u8; 256];
-    let mut utf16_buf = [0u16, 16];
-    let dont_change_kernel_keyboard_state = 0x4;
-
-    // Best-effort attempt at determining the currently active keyboard layout.
-    // At the time of writing, this works for a console application running in Windows Terminal, but
-    // doesn't work under a Conhost terminal. For Conhost, the window handle returned by
-    // GetForegroundWindow() does not appear to actually be the foreground window which has the
-    // keyboard layout associated with it (or perhaps it is, but also has special protection that
-    // doesn't allow us to query it).
-    // When this determination fails, the returned keyboard layout handle will be null, which is an
-    // acceptable input for ToUnicodeEx, as that argument is optional. In this case ToUnicodeEx
-    // appears to use the keyboard layout associated with the current thread, which will be the
-    // layout that was inherited when the console application started (or possibly when the current
-    // thread was spawned). This is then unfortunately not updated when the user changes their
-    // keyboard layout in the terminal, but it's what we get.
-    let active_keyboard_layout = unsafe {
-        let foreground_window = GetForegroundWindow();
-        let foreground_thread = GetWindowThreadProcessId(foreground_window, std::ptr::null_mut());
-        GetKeyboardLayout(foreground_thread)
-    };
-
-    let ret = unsafe {
-        ToUnicodeEx(
-            virtual_key_code,
-            virtual_scan_code,
-            key_state.as_ptr(),
-            utf16_buf.as_mut_ptr(),
-            utf16_buf.len() as i32,
-            dont_change_kernel_keyboard_state,
-            active_keyboard_layout,
-        )
-    };
-
-    // -1 indicates a dead key.
-    // 0 indicates no character for this key.
-    if ret < 1 {
-        return None;
-    }
-
-    let mut ch_iter = std::char::decode_utf16(utf16_buf.into_iter().take(ret as usize));
-    let mut ch = ch_iter.next()?.ok()?;
-    if ch_iter.next().is_some() {
-        // Key doesn't map to a single char.
-        return None;
-    }
-
-    let is_shift_pressed = key_event.control_key_state.has_state(SHIFT_PRESSED);
-    let is_capslock_on = key_event.control_key_state.has_state(CAPSLOCK_ON);
-    let desired_case = if is_shift_pressed ^ is_capslock_on {
-        CharCase::UpperCase
-    } else {
-        CharCase::LowerCase
-    };
-    ch = try_ensure_char_case(ch, desired_case);
-    Some(ch)
-}
-
 fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<KeyEvent> {
     // LOCAL PATCH — see …LOCAL_PATCH.md: presses only. Upstream keeps releases for the Alt-code
     // exception (an Alt release carrying a u_char); with Alt-code input dropped, releases carry
@@ -162,20 +71,23 @@ fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<KeyEvent> {
         VK_BACK => Some(KeyCode::Backspace),
         VK_ESCAPE => Some(KeyCode::Esc),
         VK_RETURN => Some(KeyCode::Enter),
-        // Function/navigation keys fall through here with u_char == 0 (or a control code for
-        // Tab): `get_char_for_key` then resolves to nothing (or a control char the game
-        // ignores), so their dedicated KeyCode arms are gone.
+        // Function/navigation keys fall through to the u_char match below, which resolves them
+        // to nothing, so their dedicated KeyCode arms are gone.
         _ => {
             let utf16 = key_event.u_char;
             match utf16 {
-                0x00..=0x1f => {
-                    // Some key combinations generate either no u_char value or generate control
-                    // codes. To deliver back a KeyCode::Char(...) event we want to know which
-                    // character the key normally maps to on the user's keyboard layout.
-                    // The keys that intentionally generate control codes (ESC, ENTER, etc.)
-                    // are handled by their virtual key codes above.
-                    get_char_for_key(key_event).map(KeyCode::Char)
+                // Ctrl+<letter> reaches us as the control code 0x01..=0x1a whatever the active
+                // layout, so the letter is recoverable by arithmetic. Upstream instead asks the
+                // layout through ToUnicodeEx (plus GetForegroundWindow/GetKeyboardLayout, a
+                // 256-byte key-state buffer and a UTF-16 decode) to also resolve dead keys and
+                // non-Latin control combinations, neither of which this app reads.
+                // VK_TAB is the one key in this range that is not a Ctrl combination.
+                0x01..=0x1a if key_event.virtual_key_code as i32 != VK_TAB => {
+                    Some(KeyCode::Char((b'a' + utf16 as u8 - 1) as char))
                 }
+                // Function and navigation keys arrive here with u_char == 0, dead keys likewise:
+                // nothing this app reads.
+                0x00..=0x1f => None,
                 // Surrogate halves land in the `None` of `from_u32` and are dropped (upstream
                 // pairs them up across events to deliver astral-plane chars).
                 unicode_scalar_value => {
@@ -188,13 +100,6 @@ fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<KeyEvent> {
     parse_result.map(|key_code| KeyEvent::new(key_code, modifiers))
 }
 
-// The 'y' position of a mouse event or resize event is not relative to the window but absolute to screen buffer.
-// This means that when the mouse cursor is at the top left it will be x: 0, y: 2295 (e.g. y = number of cells conting from the absolute buffer height) instead of relative x: 0, y: 0 to the window.
-pub fn parse_relative_y(y: i16) -> std::io::Result<i16> {
-    let window_size = ScreenBuffer::current()?.info()?.terminal_window();
-    Ok(y - window_size.top)
-}
-
 fn parse_mouse_event_record(
     event: &crossterm_winapi::MouseEvent,
     buttons_pressed: &MouseButtonsPressed,
@@ -202,7 +107,10 @@ fn parse_mouse_event_record(
     let modifiers = KeyModifiers::from(&event.control_key_state);
 
     let xpos = event.mouse_position.x as u16;
-    let ypos = parse_relative_y(event.mouse_position.y)? as u16;
+    // LOCAL PATCH — see …LOCAL_PATCH.md: the record's y is absolute in the screen buffer, which
+    // upstream corrects by reading the window rect on every mouse event. The alternate screen
+    // buffer is exactly window-sized, so its top is always 0 and the correction is the identity.
+    let ypos = event.mouse_position.y as u16;
 
     let button_state = event.button_state;
 

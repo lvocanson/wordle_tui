@@ -18,7 +18,7 @@ That fell at change [#2](#changelog); the work continued from there.
 | Baseline — first crossterm+ratatui TUI | 396,288 | — | — |
 | Stable — no prerequisites, cross-platform | 214,016 (−46.0%) | 418,184 | 505,872 |
 | `build-std` — nightly, std without `backtrace`; terminal still restored on panic | 117,248 (−70.4%) | 184,760 | 279,568 |
-| `immediate-abort` — nightly, most aggressive; terminal **not** restored on panic | **46,455** (−88.3%) | 73,345 | 148,784 |
+| `immediate-abort` — nightly, most aggressive; terminal **not** restored on panic | **44,991** (−88.6%) | 73,345 | 148,784 |
 
 Caveats on that table, all of them about *when* a number was taken:
 
@@ -149,6 +149,10 @@ Each row is explained in the section of the same number below.
 | 30 | Vendored crossterm: the same event-set reduction on Unix | 0 | −8,184 | 49,126 |
 | 31 | VT enabling doubles as a startup probe | −142 | — | 48,984 |
 | 32 | Vendored crossterm: blocking event source, no queue | −2,529 | −70 | 46,455 |
+| 33 | Windows raw mode is already set by mouse capture | −124 | 0 | 46,331 |
+| 34 | Vendored crossterm: key characters without the keyboard layout | −764 | 0 | 45,567 |
+| 35 | Vendored crossterm: blocking console read, no poll | −136 | 0 | 45,431 |
+| 36 | Vendored crossterm: console geometry without `CONOUT$` | −440 | 0 | 44,991 |
 
 ### 1 — Base-26 word packing
 
@@ -439,7 +443,38 @@ Unix has no equivalent probe here; a redirected stdout still runs blind there, s
 The 200 ms poll interval went with it: `run` renders on change and only an event changes anything, so the wakeups did nothing. The loop now blocks, and the process is idle between keystrokes.
 Crossterm's own out-of-line symbols drop from 3,235 B to 59 B; the rest is inlined into `run`.
 
-A queue-shaped middle step (a fixed-size ring replacing the `VecDeque`) was measured on the way and is not kept: it bought −1,141 B, all of which this change subsumes. Reverting `event/read.rs` to the upstream file with change 32 in place leaves the binary byte-identical, so the fork carries no queue patch at all.
+Reverting `event/read.rs` to the upstream file with change 32 in place leaves the binary byte-identical, so the fork carries no queue patch at all.
+
+
+### 33 — Windows raw mode is already set by mouse capture
+
+`init_terminal` called `enable_raw_mode()` and then, three statements later, `EnableMouseCapture`.
+On Windows both write the console **input** mode, and the second one *assigns* it rather than OR-ing into it: `set_mode(ENABLE_MOUSE_INPUT | ENABLE_WINDOW_INPUT | ENABLE_EXTENDED_FLAGS)` clears every other bit, raw mode's `ENABLE_LINE_INPUT`/`ENABLE_ECHO_INPUT`/`ENABLE_PROCESSED_INPUT` included.
+So `enable_raw_mode()`'s write never survived: mouse capture is what puts the console in raw mode. The same holds in reverse on the way out — `DisableMouseCapture` restores the mode captured before capture, overwriting whatever `disable_raw_mode()` just wrote.
+
+Both calls are now `#[cfg(unix)]`. Unix raw mode is termios, which the mouse sequences do not touch, so there the pair is load-bearing.
+
+Verified by reading the input mode out of a running instance: `0x98` with and without the calls — `PROCESSED`, `LINE` and `ECHO` all clear.
+
+### 34 — Vendored crossterm: key characters without the keyboard layout
+
+A key press whose `u_char` is a control code carries no character, so crossterm reconstructs one from the active keyboard layout: `GetForegroundWindow` → `GetWindowThreadProcessId` → `GetKeyboardLayout`, `ToUnicodeEx` against a 256-byte key-state buffer, a UTF-16 decode, a case correction.
+This app reads one key from that range, `Ctrl+C`, and control codes `0x01..=0x1a` *are* `Ctrl`+the *n*-th Latin letter by definition — the layout does not enter into it ([LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md) change 10).
+Plain letters never took that path; they arrive with their character already in `u_char`.
+Removes the binary's only `user32` imports.
+
+### 35 — Vendored crossterm: blocking console read, no poll
+
+`ReadConsoleInputW` blocks until a record is available. Crossterm still wraps it in `WaitForMultipleObjects` + `GetNumberOfConsoleInputEvents`, driven by a `PollTimeout`, for the sole purpose of giving up early — which [#32](#32--vendored-crossterm-blocking-event-source-no-queue) established this app never wants.
+`event::next` now calls a blocking read directly ([LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md) change 9). Off with it come `WinApiPoll`, `PollTimeout` and its `GetTickCount64` clock, three `kernel32` imports, and a `CreateFileW("CONIN$")` + `Arc` allocation + `CloseHandle` **per event**.
+
+### 36 — Vendored crossterm: console geometry without `CONOUT$`
+
+Two sites opened a private handle on the console screen buffer to read its window rectangle: the mouse parser, on every event, to convert an absolute y into a window-relative one; and `terminal::size()`.
+The app runs in the alternate screen, whose buffer is exactly window-sized, so the y correction is the identity and the parser's call goes entirely; `size()` reads the same rectangle off the standard output handle the process already owns ([LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md) change 11).
+This unlinks `ScreenBuffer`, `Handle::current_out_handle` and their `Arc`/`Drop` glue.
+
+Changes 33–36 were validated against a control binary built without them, driven through a real console (`WriteConsoleInputW` in, `ReadConsoleOutputCharacterW` out): typing, `Enter`, `Backspace`, an inert `Tab`, a click on an on-screen key and `Ctrl+C` give byte-identical screens on both. Linux is untouched by all four — same binary, and `tools/pty_test.sh` passes.
 
 
 ## Rejected experiments

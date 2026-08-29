@@ -38,6 +38,43 @@ impl WindowsEventSource {
     }
 }
 
+impl WindowsEventSource {
+    /// Blocks until the console produces an event this app reads.
+    ///
+    /// LOCAL PATCH — see …LOCAL_PATCH.md: `ReadConsoleInputW` already parks the thread until a
+    /// record is available, so a caller that never wants a deadline needs nothing else. The
+    /// `try_read` below only wraps that read in `WaitForMultipleObjects` +
+    /// `GetNumberOfConsoleInputEvents` to be able to give up early, which is the one thing this
+    /// app never asks for.
+    pub(crate) fn read_blocking(&mut self) -> std::io::Result<Option<Event>> {
+        Ok(self.to_event(self.console.read_single_input_event()?))
+    }
+
+    fn to_event(&mut self, record: InputRecord) -> Option<Event> {
+        // LOCAL PATCH — see …LOCAL_PATCH.md: no surrogate pairing, left-button-only
+        // mouse tracking, and no FocusGained/FocusLost events (the app ignores them).
+        match record {
+            InputRecord::KeyEvent(record) => handle_key_event(record),
+            InputRecord::MouseEvent(record) => {
+                let mouse_event = handle_mouse_event(record, &self.mouse_buttons_pressed);
+                self.mouse_buttons_pressed = MouseButtonsPressed {
+                    left: record.button_state.left_button(),
+                };
+
+                mouse_event
+            }
+            InputRecord::WindowBufferSizeEvent(record) => {
+                // windows starts counting at 0, unix at 1, add one to replicate unix behaviour.
+                Some(Event::Resize(
+                    (record.size.x as i32 + 1) as u16,
+                    (record.size.y as i32 + 1) as u16,
+                ))
+            }
+            _ => None,
+        }
+    }
+}
+
 impl EventSource for WindowsEventSource {
     fn try_read(&mut self, timeout: Option<Duration>) -> std::io::Result<Option<InternalEvent>> {
         let poll_timeout = PollTimeout::new(timeout);
@@ -46,30 +83,7 @@ impl EventSource for WindowsEventSource {
             if let Some(event_ready) = self.poll.poll(poll_timeout.leftover())? {
                 let number = self.console.number_of_console_input_events()?;
                 if event_ready && number != 0 {
-                    // LOCAL PATCH — see …LOCAL_PATCH.md: no surrogate pairing, left-button-only
-                    // mouse tracking, and no FocusGained/FocusLost events (the app ignores them).
-                    let event = match self.console.read_single_input_event()? {
-                        InputRecord::KeyEvent(record) => handle_key_event(record),
-                        InputRecord::MouseEvent(record) => {
-                            let mouse_event =
-                                handle_mouse_event(record, &self.mouse_buttons_pressed);
-                            self.mouse_buttons_pressed = MouseButtonsPressed {
-                                left: record.button_state.left_button(),
-                            };
-
-                            mouse_event
-                        }
-                        InputRecord::WindowBufferSizeEvent(record) => {
-                            // windows starts counting at 0, unix at 1, add one to replicate unix behaviour.
-                            Some(Event::Resize(
-                                (record.size.x as i32 + 1) as u16,
-                                (record.size.y as i32 + 1) as u16,
-                            ))
-                        }
-                        _ => None,
-                    };
-
-                    if let Some(event) = event {
+                    if let Some(event) = self.to_event(self.console.read_single_input_event()?) {
                         return Ok(Some(InternalEvent::Event(event)));
                     }
                 }
