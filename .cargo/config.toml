@@ -1,39 +1,32 @@
 # Build-size configuration.
 #
-# Two sizes depending on the toolchain used — with NO source changes between them:
+# Two profiles, with NO source changes between them (BUILD.md has the full commands):
 #
 #   cargo build --release
-#       -> ~214 KB. STABLE toolchain, host-native. The [unstable] table below is silently
-#          ignored by stable cargo, so std is not recompiled and ships its full backtrace
-#          machinery. Works on any platform — this project is NOT pinned to Windows.
+#       -> ~136 KB. The no-prerequisites build: STABLE toolchain, host-native. The unstable
+#          table below is silently ignored by stable cargo, so std is not recompiled and ships
+#          its full backtrace machinery. Works on any platform — this project is NOT pinned to
+#          Windows.
 #
-#   cargo +nightly-2026-08-25 build --release --target x86_64-pc-windows-msvc
-#       -> ~115 KB. build-std recompiles std with the release profile (opt-level=z, LTO) AND
-#          without its `backtrace` feature (build-std-features = [] below). That drops the
-#          demangle + symbolize machinery — rustc_demangle, std::backtrace_rs, the dbghelp
-#          walk (~30 KB of .text) — which is dead weight here: nothing in the game prints a
-#          backtrace. The game is unchanged and the panic hook STILL restores the terminal;
-#          a bug-panic just aborts without a symbolized trace.
-#          build-std REQUIRES an explicit --target, hence the flag. On another host substitute
-#          its triple (e.g. x86_64-unknown-linux-gnu). We deliberately do NOT pin a target in
-#          [build] here, so plain `cargo build` stays host-native and the project builds
-#          cross-platform; the price is spelling out --target on the build-std commands.
+#   ./wtui-ship.sh
+#       -> ~40 KB. The shipping build, everything on. Two levers stack there:
 #
-# Going further, `-Cpanic=immediate-abort` turns every panic (bounds-checks included) into a
-# bare abort, shedding the last ~3 KB of panic-message formatting. But then hooks no longer
-# run, so the terminal is NOT restored on a bug-panic — a hand audit shows no panic is
-# reachable with an intact binary (see OPTIMIZATION.md "immediate-abort safety"), so that risk
-# is theoretical. The paired `--cfg immediate_abort` gates the now-unreachable panic hook out
-# of main.rs (dead weight once panics bypass it). To try it (note: env RUSTFLAGS OVERRIDES the
-# [target] rustflags below, it does not merge — so /OPT:ICF and /DEBUG:NONE must be repeated
-# here or they are lost):
-#   RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clink-arg=/OPT:ICF -Clink-arg=/DEBUG:NONE" cargo +nightly-2026-08-25 build --release --target x86_64-pc-windows-msvc
+#          * build-std recompiles std with the release profile (opt-level=z, LTO) AND without
+#            its `backtrace` feature (build-std-features = [] below), dropping the demangle +
+#            symbolize machinery — rustc_demangle, std::backtrace_rs, the dbghelp walk — which
+#            is dead weight here: nothing in the game prints a backtrace. It REQUIRES an
+#            explicit --target, which is why the script always passes one. We deliberately do
+#            NOT pin a target in [build] here, so a plain `cargo build` stays host-native and
+#            the project builds cross-platform.
+#          * `-Cpanic=immediate-abort` turns every panic (bounds-checks included) into a bare
+#            abort. Panic hooks do not run, so the terminal is NOT restored on a bug-panic —
+#            a hand audit shows no panic is reachable with an intact binary (see
+#            OPTIMIZATION.md "immediate-abort safety"), so that risk is theoretical. The paired
+#            `--cfg immediate_abort` gates the now-unreachable panic hook out of main.rs.
 #
-# Nightly prerequisite (pinned, see BUILD.md):
+# Nightly prerequisite (pinned, see BUILD.md) — wtui-ship.sh installs it for you:
 #   rustup toolchain install nightly-2026-08-25 --profile minimal --component rust-src
 #
-# The optimized binary lands in target/x86_64-pc-windows-msvc/release/wordle_tui.exe (the
-# --target nests it under a per-triple dir); a plain stable build lands in target/release/.
 
 [unstable]
 build-std = ["std", "panic_abort"]
@@ -46,6 +39,12 @@ build-std-features = []
 # /OPT:ICF folds identical functions at link time. /DEBUG:NONE drops the Debug Directory the
 # linker emits even under `strip = true` (a CodeView entry pointing at wordle_tui.pdb): ~100 B
 # of VirtualSize plus the leaked .pdb path.
+#
+# The three link args that the `#![no_main]` entry point needs (/ENTRY, /SUBSYSTEM,
+# /defaultlib:vcruntime) are NOT here: rustflags reach every crate built for this triple,
+# proc-macro DLLs included, and /ENTRY breaks their link. `build/main.rs` emits them as
+# `cargo:rustc-link-arg-bins`, which applies to binaries only — and, being a build-script
+# directive rather than a rustflag, survives an env RUSTFLAGS that overrides this block.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "link-arg=/OPT:ICF", "-C", "link-arg=/DEBUG:NONE"]
 
@@ -56,7 +55,7 @@ rustflags = ["-C", "link-arg=/OPT:ICF", "-C", "link-arg=/DEBUG:NONE"]
 # There is deliberately NO ICF flag here: the default GNU bfd linker has no /OPT:ICF equivalent —
 # identical-code folding needs lld or gold. The nightly toolchain already SHIPS lld (rust-lld), so
 # no `apt install` is needed: `-Zunstable-options -Clinker-features=+lld` selects it, and
-# --icf=all folds. As with the immediate-abort command, an env RUSTFLAGS OVERRIDES this [target]
+# --icf=all folds. As with the ship command, an env RUSTFLAGS OVERRIDES this [target]
 # block (it does not merge), so repeat --build-id=none there:
 #   RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort --cfg immediate_abort -Clinker-features=+lld -Clink-arg=-Wl,--icf=all -Clink-arg=-Wl,--build-id=none" cargo +nightly-2026-08-25 build --release --target x86_64-unknown-linux-gnu
 # Measured gain is small (~1 KB), matching /OPT:ICF on Windows. --icf=all is aggressive — it folds

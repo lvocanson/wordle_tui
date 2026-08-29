@@ -2,7 +2,7 @@
 name = "wordle_tui"
 version = "1.1.0"
 edition = "2021"
-description = "Wordle in the terminal, in a 64 KB binary, no runtime files"
+description = "Wordle in the terminal, in a 40 KB binary, no runtime files"
 repository = "https://github.com/lvocanson/wordle_tui"
 license = "MIT"
 build = "build/main.rs"
@@ -24,7 +24,7 @@ crossterm = { version = "0.29.0", default-features = false, features = ["windows
 name = "stats"
 path = "tools/stats.rs"
 
-# Off-tree symbol-bloat reporter over the linker map (see tools/bloat.rs; replaces cargo-bloat).
+# Off-tree symbol-bloat reporter over the linker map (see tools/bloat.rs).
 [[example]]
 name = "bloat"
 path = "tools/bloat.rs"

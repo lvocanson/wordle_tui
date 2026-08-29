@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/lvocanson/wordle_tui/actions/workflows/ci.yml/badge.svg)](https://github.com/lvocanson/wordle_tui/actions/workflows/ci.yml)
 
-Wordle in the terminal: full-screen board, on-screen keyboard, mouse or keyboard input, and a 14,853-word dictionary — in a **50 KB** binary built on one dependency (`crossterm`) with no runtime files.
+Wordle in the terminal: full-screen board, on-screen keyboard, mouse or keyboard input, and a 14,853-word dictionary — in a **40 KB** binary built on one dependency (`crossterm`) with no runtime files.
 
 <p align="center">
   <img src="docs/demo.gif" width="400"
@@ -10,8 +10,8 @@ Wordle in the terminal: full-screen board, on-screen keyboard, mouse or keyboard
 </p>
 
 ```bash
-cargo run --release                      # stable, ~145 KB
-./wtui-cargo.sh run --immediate-abort    # nightly, 50 KB — toolchain and flags handled for you
+cargo run --release      # no prerequisites, 136 KB
+./wtui-ship.sh run       # everything on, 40 KB — toolchain and flags handled for you
 ```
 
 Rust stable builds and runs with no prerequisites.
@@ -61,7 +61,7 @@ $env:WORDLE_WORD_LEN = '6'; $env:WORDLE_MAX_GUESSES = '8'; cargo build --release
 
 The two source lists — 2,339 answers plus 12,514 further accepted guesses, 14,853 words total — are merged and compressed at build time into a single arithmetic-coded stream: **14,283 bytes, 0.96 B per word**, including the bit that says which words are answers.
 No word exists in the binary as text; lookups (`is_valid`, `pick_target`) decode the stream on the fly.
-See [OPTIMIZATION.md](OPTIMIZATION.md) for how the encoding was arrived at.
+See [OPTIMIZATION.md](OPTIMIZATION.md) for the encoding's design and its measurements.
 
 ## Repository layout
 
@@ -79,7 +79,7 @@ See [OPTIMIZATION.md](OPTIMIZATION.md) for how the encoding was arrived at.
 | `docs/` | the README's demo GIFs |
 | `tools/stats.rs` | compression and binary-size reporter (`cargo run --example stats`) |
 | `tools/validate.sh` | one-shot tests + Windows/Linux builds + size report |
-| `wtui-cargo.sh` | build driver: one command per profile, prerequisites installed on demand |
+| `wtui-ship.sh` | one-command shipping build, prerequisites installed on demand |
 | `vendor/crossterm/` | patched crossterm 0.29.0 (see its `LOCAL_PATCH.md`) |
 
 ## Tests
@@ -97,9 +97,10 @@ Size is the project's main constraint; the whole record lives in [OPTIMIZATION.m
 | Profile | Windows | Linux (glibc) |
 |---------|--------:|--------------:|
 | First working TUI (baseline) | 396,288 | — |
-| Stable, no prerequisites | 214,016 | 418,184 |
-| `build-std`, nightly | 117,248 | 184,760 |
-| `immediate-abort`, nightly | **64,297** | 85,703 |
+| Stable, no prerequisites | 135,680 | 332,752 |
+| `ship`, pinned nightly | **40,448** | 70,808 |
+
+Bytes on disk — the size a release asset shows. OPTIMIZATION.md compares un-padded section totals instead, which differ from these by the linker's section padding (and, on musl, by zero-initialized data).
 
 ## Documentation
 

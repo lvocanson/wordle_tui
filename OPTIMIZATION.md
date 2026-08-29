@@ -1,39 +1,34 @@
 # Binary size optimization
 
-The measured record of shrinking the release binary from **396,288 B** to **64,297 B** on Windows, and the reasoning behind each change.
+The measured record of shrinking the release binary from **396,288 B** to **40,448 B** on Windows, and the reasoning behind each change.
 
 [README.md](README.md) presents the game; **[BUILD.md](BUILD.md) holds the build command for every profile on every platform**.
 This file never repeats a command — it names a profile and reports what it measured.
 
 **Contents** — [Where it stands](#where-it-stands) · [How sizes are measured](#how-sizes-are-measured) · [Changelog](#changelog) · [Rejected experiments](#rejected-experiments) · [Stuck costs](#stuck-costs) · [Panic handling](#panic-handling)
 
-The original target was ~300 KB: the size of this repo's initial commit (`3b320c2`), a plain stdin/stdout solver with no TUI, written with no size effort at all.
-It stood for what a naive CLI happens to compile to, and the point was to fit the full interactive TUI under it.
-That fell at change [#2](#changelog); the work continued from there.
-
 ## Where it stands
 
 | Profile | Windows | Linux (glibc) | Linux (musl) |
 |---------|--------:|--------------:|-------------:|
 | Baseline — first crossterm+ratatui TUI | 396,288 | — | — |
-| Stable — no prerequisites, cross-platform | 214,016 (−46.0%) | 418,184 | 505,872 |
-| `build-std` — nightly, std without `backtrace`; terminal still restored on panic | 117,248 (−70.4%) | 184,760 | 279,568 |
-| `immediate-abort` — nightly, most aggressive; terminal **not** restored on panic | **44,991** (−88.6%) | 73,345 | 148,784 |
+| Stable — no prerequisites, cross-platform | 135,680 (−65.8%) | 332,752 | 426,280 |
+| `ship` — pinned nightly, most aggressive; terminal **not** restored on panic | **40,448** (−89.8%) | 70,808 | 86,008 |
 
 Caveats on that table, all of them about *when* a number was taken:
 
-- The **stable** and **build-std** rows are on-disk sizes measured before the recent data-layer and renderer work; they were not re-measured.
-  The **immediate-abort** Windows and Linux-glibc figures are un-padded section totals from the current source, re-measured 2026-08-25 on the pinned toolchain (see below for why the two metrics differ); the musl figure is older.
+- Every profile figure comes from the current source, all six re-measured 2026-08-29 — stable on whatever toolchain the machine had, `ship` on the pinned nightly.
+  The **baseline** is the one number not re-measured, kept for scale. It predates the corpus format, so read the percentages as indicative rather than like-for-like.
 - Windows and Linux numbers are **not** comparable to each other: different linker, CRT and section layout, and glibc offloads libc to the system while the Windows `.exe` and musl do not.
   To compare platforms, re-measure both under the same lever.
-  Linux currently runs ~24 KB heavier than Windows, about half of it the `.eh_frame` unwind tables (see [Stuck costs](#stuck-costs)) and most of the rest the Unix input stack — mio, signal-hook and the signal-driven resize path — which has no Windows counterpart.
+  Linux currently runs ~30 KB heavier than Windows, about half of it the `.eh_frame` unwind tables (see [Stuck costs](#stuck-costs)) and most of the rest the Unix input stack — mio, signal-hook and the signal-driven resize path — which has no Windows counterpart.
 
-The embedded corpus accounts for 14,283 B — 29% of the current Windows binary.
+The embedded corpus accounts for 14,283 B — 35% of the 40,448 B Windows binary, 38% of its section total (the share `tools/stats.rs` prints).
 
 ## How sizes are measured
 
 Build with a profile from [BUILD.md](BUILD.md), then measure with `tools/stats.rs`.
-Totals are only comparable at equal rustc — a toolchain bump alone moved the Windows total by tens of bytes — so the measurement toolchain is **pinned** (in `wtui-cargo.sh`); bump it deliberately and re-measure the reference totals when you do.
+Totals are only comparable at equal rustc — a toolchain bump alone can move the Windows total by tens of bytes — so the measurement toolchain is **pinned** (in `wtui-ship.sh`); bump it deliberately and re-measure the reference totals when you do.
 The tool only *measures* — it never builds, so build first:
 
 ```bash
@@ -53,14 +48,14 @@ Each run also records its section sizes in a `.sections` sidecar next to the mea
 
 > **Compare the section total, not the file on disk.**
 > PE pads sections to 512 B and ELF to page alignment, so a genuine saving of a few dozen bytes usually shows as 0 on disk — and occasionally as a −512 cliff that credits one change with the padding several changes filled.
-> The file on disk is what you ship; the section total is what you compare.
+> The file on disk is what you ship — the number README and [Where it stands](#where-it-stands) quote; the section total is what you compare.
 >
 > This is why the two halves of the [changelog](#changelog) use different metrics: changes #1–#8 predate the tool and are on-disk `.exe` bytes (each one happens to be a multiple of 512), while #12 onward are section totals.
 
 The build script runs before linking and cannot see the final binary, which is why this is a post-build tool rather than a `cargo:warning`.
 
 **Full validation run.**
-`tools/validate.sh` does everything in one invocation — tests, the Windows build and its size, the Linux build and size through WSL (both measured with the same `stats.rs` reporter), and the symbol-bloat report over both linker maps (`tools/bloat.rs`) — on the shipping profile (immediate-abort).
+`tools/validate.sh` does everything in one invocation — tests, the Windows build and its size, the Linux build and size through WSL (both measured with the same `stats.rs` reporter), and the symbol-bloat report over both linker maps (`tools/bloat.rs`) — on the shipping profile (ship).
 It exits non-zero with a summary if any step failed.
 Use Git Bash on Windows:
 
@@ -86,7 +81,7 @@ bloaty target/x86_64-unknown-linux-gnu/release/wordle_tui
 ```
 
 **Symbol attribution: `tools/bloat.rs` over the linker map.**
-BUILD.md's immediate-abort commands make the link also emit its symbol map (`/MAP:target/wordle_tui.map` on MSVC, `-Wl,-Map=target/wordle_tui-linux.map` on lld) — **without changing a byte of the binary** (verified: only the 6 link-timestamp bytes differ).
+BUILD.md's ship commands make the link also emit its symbol map (`/MAP:target/wordle_tui.map` on MSVC, `-Wl,-Map=target/wordle_tui-linux.map` on lld) — **without changing a byte of the binary** (verified: only the 6 link-timestamp bytes differ).
 
 ```bash
 cargo run --example bloat
@@ -96,7 +91,7 @@ reads the freshest map (pass a path to pin one, `-n N` for the list length) and 
 Crates come from the demangled names — under fat LTO every Rust symbol lands in one object, so object-based attribution is meaningless.
 This method found changes [#24–#26](#changelog).
 
-It replaces **`cargo bloat`**, which had two failure modes, both observed here: identical-code folding made it attribute a folded body to an arbitrary, often-dead symbol name — that is how `supports_ansi` and its `env::var` kept appearing in reports of a binary that does not contain them — and it re-runs its own build rather than reading the link that produced the shipping binary.
+**`cargo bloat`** is not used here: it has two failure modes, both of them visible on this binary — identical-code folding makes it attribute a folded body to an arbitrary, often-dead symbol name, which is how `supports_ansi` and its `env::var` turn up in reports of a binary that does not contain them, and it re-runs its own build rather than reading the link that produced the shipping binary.
 Cargo's *"patch … was not used in the crate graph"* warning is **not** a signal either way — it also fires on correct builds whenever the patched version equals the registry one; `tools/validate.sh` instead probes the built binary for upstream-crossterm markers (`NO_COLOR`/`COLORTERM`) and fails if they are present.
 Confirm any lead by string-probing the binary and by a measured rebuild.
 
@@ -125,7 +120,7 @@ Each row is explained in the section of the same number below.
 | 9 | `/DEBUG:NONE` (PE) / `--build-id=none` (ELF) | −56 | −112 | — |
 | 10 | `build-std` without std's `backtrace` | ≈ −39 KB | ≈ −233 KB | — |
 | 11 | `-Cpanic=immediate-abort` | −30,720 | −58,864 | — |
-| | **C — Source & data changes since** *(immediate-abort profile, section totals; Windows from 77,838)* | | | |
+| | **C — Source & data changes since** *(ship profile, section totals; Windows from 77,838)* | | | |
 | 12 | Raw ANSI output | −5,777 | +15 | 72,061 |
 | 13 | Vendored crossterm: ioctl-only `size()` | 0 | −28,705 | 72,061 |
 | 14 | Decoder without per-word heap `Vec` | −216 | — | 71,845 |
@@ -153,6 +148,7 @@ Each row is explained in the section of the same number below.
 | 34 | Vendored crossterm: key characters without the keyboard layout | −764 | 0 | 45,567 |
 | 35 | Vendored crossterm: blocking console read, no poll | −136 | 0 | 45,431 |
 | 36 | Vendored crossterm: console geometry without `CONOUT$` | −440 | 0 | 44,991 |
+| 37 | `#![no_main]`: the process starts without Rust's runtime | −7,528 | −4,130 | 37,463 |
 
 ### 1 — Base-26 word packing
 
@@ -477,6 +473,28 @@ This unlinks `ScreenBuffer`, `Handle::current_out_handle` and their `Arc`/`Drop`
 Changes 33–36 were validated against a control binary built without them, driven through a real console (`WriteConsoleInputW` in, `ReadConsoleOutputCharacterW` out): typing, `Enter`, `Backspace`, an inert `Tab`, a click on an on-screen key and `Ctrl+C` give byte-identical screens on both. Linux is untouched by all four — same binary, and `tools/pty_test.sh` passes.
 
 
+### 37 — `#![no_main]`: the process starts without Rust's runtime
+
+An empty `fn main() {}` on this profile is **19,456 B**. Nothing in it is the program: it is `std::rt`'s entry path, `lang_start`, which wraps the real `main` in `rt::init` and `rt::cleanup` — and on MSVC the C runtime's startup underneath that.
+
+Neither does anything this game needs. `rt::init` installs a stack-guard page for the main thread, records thread identity, and on Linux stores the `argc`/`argv` that back `env::args`; `rt::cleanup` flushes stdout at exit. There is no recursion in the tree and no live `thread::spawn` (crossterm's is behind the disabled `event-stream` feature), so nothing can overflow the stack or ask for a thread name; no code reads an argument; and `restore_terminal` already flushes.
+
+`#![no_main]` replaces that entry, and the two platforms sit at different depths:
+
+- **Unix** — `main` is defined as `extern "C"`, so glibc's `_start` and `__libc_start_main` still run and call it. Only `lang_start` is skipped. **−4,130 B.**
+- **Windows** — `mainCRTStartup` *is* the MSVC CRT's entry, and defining it replaces the CRT startup outright: `__scrt_common_main_seh`, `__isa_available_init`, the security-cookie init and the `onexit` tables all go, and `ExitProcess` becomes ours to call. **−7,528 B**, roughly 6 KB more than the Unix-depth change would have bought here.
+
+The Windows depth has three consequences, all checked rather than assumed:
+
+- The linker reads the entry point and the subsystem off the names `main`/`WinMain`, and neither exists now, so `/ENTRY:mainCRTStartup` and `/SUBSYSTEM:CONSOLE` must be stated, and `/defaultlib:vcruntime` must supply the `memcpy`/`memmove` the CRT startup object would have brought in. These are emitted by `build/main.rs` as `rustc-link-arg-bins`, not put in `.cargo/config.toml`: rustflags reach every crate built for the triple and `/ENTRY` breaks the proc-macro DLLs' link. As a build-script directive it also survives an env `RUSTFLAGS` that overrides the `[target]` block, so no build command in BUILD.md changes.
+- `memcpy` from `vcruntime` dispatches on `__isa_available`, which the CRT startup would have set. Left at 0 it takes the baseline SSE2 path — correct on any x86-64, marginally slower on a machine with AVX. The corpus decode, the heaviest user of it, is one pass at startup.
+- The link warns LNK4210, that `.CRT`'s static initializers and terminators may go unrun. Here the section is empty — the map shows only `tlssup.obj`'s bounds markers `__xl_a` and `__xl_z` with no entry between them, so no C/C++ initializer and no TLS callback exists to miss. The warning is suppressed with `/IGNORE:4210` at that one site; the comment there names the condition that would make it real again (a `thread_local!` with a destructor reaching the binary).
+
+`no_main` and both entry points are `cfg(not(test))`: a `cargo test` build of a bin target needs the harness's own `main`, and suppressing it makes the test link fail. The link args stay unconditional — with the CRT startup back in the picture, `/ENTRY:mainCRTStartup` simply names the CRT's own.
+
+Verified on both platforms against a control binary: Windows through the console harness (typing, `Enter`, `Backspace`, an inert `Tab`, a click on an on-screen key, `Ctrl+C`) with byte-identical screens, plus the redirected-stdout and no-console startups still exiting 0 without writing; Linux through `tools/pty_test.sh`, 11/11. Both the stable and ship profiles build on both platforms.
+
+
 ## Rejected experiments
 
 Measured, then reverted.
@@ -490,7 +508,7 @@ Recorded so they are not retried.
 | `Model.counts`/`pref`: `Vec` → `Box<[T]>` | **+156 B** | `into_boxed_slice()` pulls in the shrink/realloc path. |
 | `App::submit`: array copy → `guess == &self.target` | **+48 B** | Cleaner, but the comparison costs more than the copy. |
 | `ui::gaps`: indexed loop → `iter_mut().take(d).enumerate()` | **+16 B** | Clippy's suggestion; the `.take` iterator machinery costs more. Kept under `#[allow(needless_range_loop)]`. |
-| Raw-handle stdout on Windows (write to the stdout `HANDLE` via `File`/`WriteFile` to skip std's console UTF-16 path) | −314 B | The `File`/`WriteFile` path pulls back most of what the UTF-16 path freed. Not worth the `unsafe` handle wrapping, a platform-split writer type, and output-path risk that cannot be verified without a real Windows console. |
+| Raw-handle stdout on Windows (write to the stdout `HANDLE` via `File`/`WriteFile` to skip std's console UTF-16 path) | −314 B | The `File`/`WriteFile` path pulls back most of what the UTF-16 path freed. **The experiment also measured the wrong thing**: `File::write` calls `io::Error::last_os_error()` just as std's `Stdout::write` does, so it kept the anchor that makes the error machinery unremovable (see [Stuck costs](#stuck-costs)). A retry would have to drop `io::Error`-returning writes entirely. |
 | `run()`: key and click paths merged through one `Option<KeyEvent>` | **+196 B** | The intermediate `Option<KeyEvent>` (a large crossterm struct) spills more than the duplicated `handle_key` call sites cost. |
 | `run()`: first frame from a `Grid::empty()` instead of a thrown-away `build_grid` call | **+40 B** | Two identical call sites compile smaller than one call site plus an empty-grid constructor. |
 | `draw_footer` outlined | **+60 B** | Unlike [#29](#29--uidraw_boarddraw_keyboard-outlined): too small to win back its call overhead. |
@@ -500,19 +518,18 @@ Recorded so they are not retried.
 
 - **Stable profile: the panic runtime.**
   Backtrace machinery (~12 KB), `io::error` formatting (~3 KB) and `env` (~2 KB) are linked unavoidably; the `backtrace` lever ([#10](#10--build-std-without-stds-backtrace)) exists only on nightly.
-- **Linux `.eh_frame` + `.eh_frame_hdr` (11.9 KB, down from ~18.6 KB as the code they describe has shrunk).**
+- **Linux `.eh_frame` + `.eh_frame_hdr` (11.9 KB).**
   Unwind tables from the *prebuilt* std, dead under `panic=abort` and immediate-abort since nothing unwinds, but this profile links prebuilt std, so no build flag drops them.
-  Reclaimable via build-std (`-Cforce-unwind-tables=no`) or a post-link `objcopy --remove-section .eh_frame --remove-section .eh_frame_hdr` (measured at the time: 118,608 → 99,956, −18,652 B) — the latter leaves a dangling `PT_GNU_EH_FRAME` program header, so validate at runtime before relying on it.
+  Reclaimable via build-std (`-Cforce-unwind-tables=no`) or a post-link `objcopy --remove-section .eh_frame --remove-section .eh_frame_hdr` (measured on a 118,608 B binary: 118,608 → 99,956, −18,652 B) — the latter leaves a dangling `PT_GNU_EH_FRAME` program header, so validate at runtime before relying on it.
   About half the Windows/Linux gap; most of the rest is the Unix input stack (mio, signal-hook, the signal-driven resize path), which Windows does not have.
 - **Dependency features: nothing left to trim.**
   crossterm is at its floor ([#3](#3--crossterm-feature-floor)) — `events` is required for input, `windows` for raw mode/console, and crossterm has no `no_std` mode.
   On Windows, `events` pulls `mio`/`signal-hook`/`signal-hook-mio` only under `cfg(unix)`, so they are not compiled.
-  And cargo *unions* features across the graph, so from our manifest we can only ever *add* a transitive dependency's features, never remove one crossterm's own edge requests — which is why the only lever that worked was `[patch]`-ing crossterm itself ([#13](#13--vendored-crossterm-ioctl-only-size), [#15](#15--vendored-crossterm-single-threaded-parking_lot-dropped)).
-- **The OS-error message subtree (~2.1 KB `.text`: `error_string`, `alloc::fmt::format`, `String::write_fmt`, `fmt::num`).**
-  std's `io::Error` registers a lazy OS-message provider (`from_raw_os_error`'s `FUNCTION`) the moment any `last_os_error()` exists in the binary — and std's own stdio write path creates them, so no crossterm patch can free it.
-  Likewise `decode_error_kind` (~640 B) is anchored by the `ErrorKind::Interrupted` retry loops inside std's `write_all`, not by crossterm's.
-- **`crossterm_winapi`'s `write_char_buffer` UTF-16 machinery (~700 B).**
-  `EncodeUtf16 → Vec` collect plus friends stay linked from the upstream crate; freeing them would mean vendoring `crossterm_winapi` too — noted, not done.
+  And cargo *unions* features across the graph, so from our manifest we can only ever *add* a transitive dependency's features, never remove one crossterm's own edge requests — which is why the only lever that works is `[patch]`-ing crossterm itself ([#13](#13--vendored-crossterm-ioctl-only-size), [#15](#15--vendored-crossterm-single-threaded-parking_lot-dropped)).
+- **The OS-error subtree (~3.5 KB `.text`), anchored by `io::Error::last_os_error()` alone.**
+  `core::io::Error` cannot call the OS itself, so `std::io::Error::from_raw_os_error` hands it a `&'static OsFunctions` — three function pointers, `format_os_error`, `decode_error_kind`, `is_interrupted` — which `set_functions` stores in an `AtomicPtr`. Storing their address is what makes all three unremovable, so **one `last_os_error()` anywhere** keeps the errno→`ErrorKind` table (`decode_error_kind`, 640 B) *and* the message formatter (`error_string` → `FormatMessageW`, plus `String`/`alloc::fmt::format` and `<i32 as Display>::fmt` for the `os error N` fallback), even though nothing in this program ever reads an error message.
+  Reading the pointer is free; only creating an OS error anchors it. Two call sites do, and neither is ours: std's `Stdout::write` on every `write_all`, and `crossterm_winapi`'s `result()`/`handle_result()`.
+  Measured with a probe on this profile: `#![no_main]` plus a single `io::stdout().write_all(b"hi")` and no other code pulls the whole cluster. Freeing it means giving up `io::stdout()` *and* `crossterm_winapi` — our own `WriteConsoleW` writer returning `io::Error::from(ErrorKind)`, and direct FFI for the console read. That would also shed std's stdout stack (`LineWriter`, `BufWriter`, `ReentrantLock`, `OnceLock`, the `EncodeUtf16 → Vec<u16>` console conversion), another ~2 KB. Noted, not done.
 - Everything else in `.text` is either ours (`main`, `ui::build_grid`, `app::submit`, `words::decode_word`) or genuinely-used std and crossterm — on Linux, notably the Unix input stack (`parse_event`, signal-hook, mio).
 
 ## Panic handling
@@ -559,5 +576,5 @@ Both carry a source comment pointing here:
    The sort proves `w[p] > prev[p]` with `w[p] <= 25`, so `prev[p] <= 24` ⟹ `lo <= 25` ⟹ at least the `s = 25` term ⟹ `char_tot >= 1`.
    The colour decode feeds `decode_freq(f0 + f1)` with `f0, f1 >= 1` (add-one smoothing), so its total is always `>= 2`.
 
-No runtime `assert!` was added to "lock" these: that would create panic sites and grow the binary — the opposite of the goal.
+No runtime `assert!` locks these: an assert would create panic sites and grow the binary — the opposite of the goal.
 The invariant is enforced where it belongs, at build time.

@@ -145,7 +145,7 @@ The unused parsers are left in the file, unreferenced, behind a file-level `#![a
 
 Upstream's two calls are a pump: `poll` asks the source for an event, **queues** it, and answers "yes there is one"; `read` then takes it back out. Everything between them exists to carry that event across the two calls — a `VecDeque` plus a `Vec` of filtered-out events, the `Filter` trait, `InternalEventReader`, and a `Box<dyn EventSource>` behind a static. But `EventSource::try_read` already returns `Result<Option<InternalEvent>>`: one call, one event. `next` holds the source in a static named by its **concrete** type (no vtable), calls `try_read(None)` and hands the `InternalEvent::Event` payload straight back.
 
-`None` means "no timeout", which is the second half of the change: this app renders on change and only an event changes anything, so the old 200 ms poll interval woke the process up for nothing. Blocking removes `PollTimeout`'s timeout arithmetic from the caller's side and drops the process to zero wakeups while idle.
+`None` means "no timeout", which is the second half of the change: this app renders on change and only an event changes anything, so upstream's 200 ms poll interval wakes the process up for nothing. Blocking removes `PollTimeout`'s timeout arithmetic from the caller's side and drops the process to zero wakeups while idle.
 
 Windows keeps its source inline in the static (three words). Unix's carries the parser's buffers, so it stays boxed — inlined it would trade a pointer-sized win for ~3 KB of `.bss`. The Unix source can also yield replies to terminal queries this app never sends (cursor position, device attributes); `next` skips them and blocks again.
 

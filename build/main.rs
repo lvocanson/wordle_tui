@@ -18,6 +18,8 @@ use encode::best_model;
 use words::{merge_words, read_words, word_length, WordKind};
 
 fn main() {
+    emit_entry_point_link_args();
+
     let manifest = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo");
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR is set by cargo");
     let res = Path::new(&manifest).join("res");
@@ -113,4 +115,29 @@ fn main() {
         ),
     )
     .unwrap_or_else(|e| panic!("cannot write constants.rs: {e}"));
+}
+
+/// `main.rs` is `#![no_main]` and, on MSVC, defines `mainCRTStartup` itself in place of the CRT's
+/// own startup. The linker reads the entry point and the subsystem off the names `main`/`WinMain`,
+/// and neither is present, so both have to be stated; `vcruntime` then supplies the
+/// `memcpy`/`memmove` the CRT startup object would have brought in. Without the three the link
+/// fails outright (LNK1561, LNK1221, unresolved `memcpy`).
+///
+/// These go through `rustc-link-arg-bins` rather than `.cargo/config.toml`: rustflags reach every
+/// crate built for the triple, and `/ENTRY` breaks the link of the proc-macro DLLs among them.
+/// The directive is also immune to an env `RUSTFLAGS` overriding the `[target]` block, so the
+/// hand-typed build commands in BUILD.md do not have to repeat it.
+fn emit_entry_point_link_args() {
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg-bins=/ENTRY:mainCRTStartup");
+        println!("cargo:rustc-link-arg-bins=/SUBSYSTEM:CONSOLE");
+        println!("cargo:rustc-link-arg-bins=/defaultlib:vcruntime");
+        // LNK4210 warns that `.CRT` exists and its static initializers/terminators may go unrun,
+        // because bypassing the CRT startup means nothing walks that section. Here it is empty:
+        // the linker map shows `.CRT` holding only `__xl_a` and `__xl_z`, `tlssup.obj`'s bounds
+        // markers, with no entry between them — no C/C++ initializer (`.CRT$XI*`/`XC*`) and no
+        // TLS callback (`.CRT$XL[B-Y]`). Re-check that if a `thread_local!` with a destructor
+        // ever reaches the binary: that registers a real callback, which would then never run.
+        println!("cargo:rustc-link-arg-bins=/IGNORE:4210");
+    }
 }

@@ -13,8 +13,8 @@ const END_CONTROLS: &str = "<Enter> Restart <Esc> Quit";
 const MSG_CAP: usize = 48;
 
 // The one dynamic string in the game, kept in a fixed buffer instead of a `String`: these
-// messages were the only `String` writers in the binary, and the heapless buffer drops the
-// `String::push`/`push_str` monomorphizations and the `RawVec` grow path they anchored
+// messages are the only dynamic text the binary produces, and the heapless buffer keeps out
+// the `String::push`/`push_str` monomorphizations and the `RawVec` grow path a `String` anchors
 // (the only other allocation, `ui::Grid`'s cell `Vec`, is sized exactly and never grows).
 // `len == 0` doubles as "no message": no message the game produces is empty.
 pub struct App {

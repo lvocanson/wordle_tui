@@ -176,7 +176,7 @@ pub fn count_update(row: &mut [u16; 26], inc: u16, sym: usize) {
 
 // Prefix-length model over 0..pref.len(), same add-one smoothing. Its running total *is* cached
 // (`total`) rather than recomputed: `pref` is summed in two hot spots, so caching a u32 there is a
-// net win where dropping the counts' parallel total was not (see OPTIMIZATION.md).
+// net win (see OPTIMIZATION.md).
 pub fn pref_tot(pref: &[u16], total: u32) -> u32 {
     total + pref.len() as u32
 }
@@ -211,7 +211,7 @@ pub fn pref_update(pref: &mut [u16], total: &mut u32, inc: u16, p: usize) {
 
 // Decode the colour bit that follows each word: true = answer (colour A). A small adaptive binary
 // model conditioned on one letter of the word (see `color_ctx`): answers avoid certain endings
-// (plurals in -s), a structural signal the earlier exact sampling-without-replacement was blind to.
+// (plurals in -s), a structural signal that exact sampling-without-replacement is blind to.
 // `row` is [not-answer, answer] counts for the context; add-one smoothed, incremented by one, never
 // halved (u32 counts cannot overflow for any word list the sort admits). `f0 + f1 >= 2 > 0`, so
 // decode_freq never divides by zero here. Conditioning saves far more than the ~1 B of coding slack

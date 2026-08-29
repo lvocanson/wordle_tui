@@ -1,3 +1,9 @@
+// The process does not go through Rust's `lang_start`. Both entry points below hand straight to
+// `game()`, so `std::rt::init`/`rt::cleanup` never run: no main-thread stack guard, no stdout
+// flush at exit, and on Linux none of the `argc`/`argv` statics behind `env::args`. Nothing here
+// needs any of that — there is no recursion, no thread, and no argument parsing, and the terminal
+// is flushed and restored by `restore_terminal`. See OPTIMIZATION.md.
+#![cfg_attr(not(test), no_main)]
 use std::io::{self, Stdout, Write};
 
 use crossterm::event::{
@@ -167,7 +173,35 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     false
 }
 
-fn main() {
+/// Unix entry point: glibc's `_start` runs, then `__libc_start_main` calls this instead of Rust's
+/// `lang_start`.
+#[cfg(all(unix, not(test)))]
+#[no_mangle]
+pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
+    game();
+    0
+}
+
+/// Windows entry point: the MSVC CRT's own, replaced outright, so its startup does not run either
+/// — no `__scrt_common_main_seh`, no security cookie, no `onexit` tables. `ExitProcess` is then
+/// ours to call. The linker cannot infer the entry or the subsystem from a name it does not know,
+/// hence the `/ENTRY` and `/SUBSYSTEM` link args in `.cargo/config.toml`; `/defaultlib:vcruntime`
+/// supplies the `memcpy`/`memmove` the CRT object would otherwise have brought in.
+#[cfg(all(windows, not(test)))]
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn mainCRTStartup() -> ! {
+    game();
+    unsafe { ExitProcess(0) }
+}
+
+#[cfg(all(windows, not(test)))]
+#[link(name = "kernel32")]
+extern "system" {
+    fn ExitProcess(code: u32) -> !;
+}
+
+fn game() {
     // Minimal hook: restore the terminal, then exit. We `exit(101)` rather than return
     // (which would let panic = "abort" call abort()): on Windows abort() hands off
     // to Windows Error Reporting, a ~1s stall before the shell returns. exit() skips it.
