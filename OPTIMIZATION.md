@@ -1,6 +1,6 @@
 # Binary size optimization
 
-The measured record of shrinking the release binary from **396,288 B** to **39,936 B** on Windows, and the reasoning behind each change.
+The measured record of shrinking the release binary from **396,288 B** to **28,672 B** on Windows, and the reasoning behind each change.
 
 [README.md](README.md) presents the game; **[BUILD.md](BUILD.md) holds the build command for every profile on every platform**.
 This file never repeats a command — it names a profile and reports what it measured.
@@ -12,8 +12,8 @@ This file never repeats a command — it names a profile and reports what it mea
 | Profile | Windows | Linux (glibc) | Linux (musl) |
 |---------|--------:|--------------:|-------------:|
 | Baseline — first crossterm+ratatui TUI | 396,288 | — | — |
-| Stable — no prerequisites, cross-platform | 135,680 (−65.8%) | 331,888 | 425,416 |
-| `ship` — pinned nightly, most aggressive; terminal **not** restored on panic | **39,936** (−89.9%) | 70,088 | 85,272 |
+| Stable — no prerequisites, cross-platform | 124,416 (−68.6%) | 329,872 | 423,368 |
+| `ship` — pinned nightly, most aggressive; terminal **not** restored on panic | **28,672** (−92.8%) | 67,848 | 83,056 |
 
 Caveats on that table, all of them about *when* a number was taken:
 
@@ -23,7 +23,7 @@ Caveats on that table, all of them about *when* a number was taken:
   To compare platforms, re-measure both under the same lever.
   Linux currently runs ~30 KB heavier than Windows, about half of it the `.eh_frame` unwind tables (see [Stuck costs](#stuck-costs)) and most of the rest the Unix input stack — mio, signal-hook and the signal-driven resize path — which has no Windows counterpart.
 
-The embedded corpus accounts for 14,283 B — 36% of the 39,936 B Windows binary, 38% of its section total (the share `tools/stats.rs` prints).
+The embedded corpus accounts for 14,283 B — 50% of the 28,672 B Windows binary, 56% of its section total (the share `tools/stats.rs` prints).
 
 ## How sizes are measured
 
@@ -95,6 +95,17 @@ This method found changes [#24–#26](#changelog).
 Cargo's *"patch … was not used in the crate graph"* warning is **not** a signal either way — it also fires on correct builds whenever the patched version equals the registry one; `tools/validate.sh` instead probes the built binary for upstream-crossterm markers (`NO_COLOR`/`COLORTERM`) and fails if they are present.
 Confirm any lead by string-probing the binary and by a measured rebuild.
 
+**Behaviour checks.**
+`cargo test` covers the codec and the layout; nothing in it drives a terminal, so the input path is checked by running the built binary instead.
+On Linux `tools/pty_test.sh` drives it under a real PTY (`script -qec`, 80x30) and asserts on the bytes it renders: typing and submitting a word, an invalid word, backspace, Ctrl+C and Esc quitting, arrows and F-keys leaving the draft untouched, and clicks on the ENTER button and on a letter key in **both** mouse encodings.
+
+```bash
+bash tools/pty_test.sh target/x86_64-unknown-linux-gnu/release/wordle_tui
+```
+
+Run it against a control binary built from the previous commit as well: the PTY line discipline mangles some input on its own (`ICRNL` eats CR, `ISIG` eats `0x03` before raw mode is on), so a bare failure list does not read as a regression on its own. A patch is a regression only when the two runs differ.
+The Windows console path has no checked-in equivalent — it needs a harness injecting `INPUT_RECORD`s and reading the screen back, since a PTY exercises none of it.
+
 ## Changelog
 
 Every measured change, oldest first.
@@ -150,6 +161,10 @@ Each row is explained in the section of the same number below.
 | 36 | Vendored crossterm: console geometry without `CONOUT$` | −440 | 0 | 44,991 |
 | 37 | `#![no_main]`: the process starts without Rust's runtime | −7,528 | −4,130 | 37,463 |
 | 38 | Vendored crossterm: unreferenced code deleted | −376 | +16 | 37,087 |
+| 39 | Own stdout, no `io::stdout()` | −4,316 | −4,124 | 32,771 |
+| 40 | Vendored crossterm: console API without `crossterm_winapi` | −1,855 | 0 | 30,916 |
+| 41 | `Out` writes through `WriteFile`, not `std::fs::File` | −5,198 | 0 | 25,718 |
+| 42 | Vendored crossterm: a resize reports a count, not an index | −16 | 0 | 25,702 |
 
 ### 1 — Base-26 word packing
 
@@ -193,7 +208,7 @@ Lookups walk the compressed stream directly instead of decoding it once into a `
 Both lists merged into one adaptive-model arithmetic-coded stream (`src/codec.rs`, encoder in `build/`), replacing the varint scheme; the source was split into `build/` modules in the same pass.
 Small on the binary, but it is the foundation the data work in [#19](#19--position-conditioned-context) and [#21](#21--conditioned-colour-bit) builds on.
 
-The encoder (build) and decoder (game) share `codec.rs`'s model *math*, so they agree bit-for-bit — the `corpus_round_trips` test guards this.
+The encoder (build) and decoder (game) share `codec.rs`'s model *math*, so they agree bit-for-bit.
 The halves that only one end runs live apart: the range decoder and the reverse lookups in `src/codec.rs`, the range encoder and the forward lookups in `build/codec_enc.rs`, which the binary never compiles.
 They no longer share its *storage*; see [#18](#18--asymmetric-decoder-fixed-array-model-storage).
 
@@ -211,10 +226,9 @@ BUILD.md's commands already do.
 
 ### 10 — `build-std` without std's `backtrace`
 
-`cargo bloat` showed the largest non-game mass was the panic **backtrace/demangle** machinery: `rustc_demangle` (~8 KB), `std::sys::backtrace` (~6 KB), `backtrace_rs::symbolize` and the `dbghelp` walk, plus satellites (`getenv` for `RUST_BACKTRACE`, `path::components`, `slice_error_fail`) — **57 symbols**, all dead weight, since nothing in the game prints a backtrace.
+The largest non-game mass was the panic **backtrace/demangle** machinery: `rustc_demangle` (~8 KB), `std::sys::backtrace` (~6 KB), `backtrace_rs::symbolize` and the `dbghelp` walk, plus satellites (`getenv` for `RUST_BACKTRACE`, `path::components`, `slice_error_fail`) — **57 symbols**, all dead weight, since nothing in the game prints a backtrace.
 
-It cannot be dropped from source.
-std's panic runtime keeps `match HOOK { Hook::Default => default_hook(..) }` compiled, and LTO cannot prove the hook is never `Default`, so `default_hook` and everything it calls stay reachable whatever custom hook we install — confirmed by measurement: replacing the hook left all 57 symbols linked and freed only ~432 B of plumbing.
+It cannot be dropped from source: std's panic runtime keeps `match HOOK { Hook::Default => default_hook(..) }` compiled, and LTO cannot prove the hook is never `Default`, so `default_hook` and everything it calls stay reachable whatever custom hook is installed — replacing the hook leaves all 57 symbols linked and frees ~432 B of plumbing.
 
 The lever is at the std level, in `.cargo/config.toml` (the `[unstable]` table is ignored by stable cargo, so the stable build is untouched):
 
@@ -224,15 +238,11 @@ build-std = ["std", "panic_abort"]
 build-std-features = []   # none of std's defaults -> no `backtrace`
 ```
 
-Result: 57 → 4 backtrace symbols (~45 B of inert stubs), `.exe` 156.7 KB → 117.8 KB.
-Crucially it stays a **safe** build — the panic hook still runs and restores the terminal; a bug-panic just aborts without a symbolized trace.
-This is the recommended no-compromise profile.
+57 → 4 backtrace symbols (~45 B of inert stubs), `.exe` 156.7 KB → 117.8 KB. It stays a **safe** build: the panic hook still runs and restores the terminal, a bug-panic just aborts without a symbolized trace.
+The Linux gain is far larger, std's backtrace there carrying its own DWARF stack (gimli, addr2line, object, miniz_oxide) instead of calling into a system library.
 
-The Linux gain is far larger because std's backtrace there carries its own DWARF stack (gimli, addr2line, object, miniz_oxide) instead of calling into a system library.
-
-`build-std` requires an explicit `--target`; the config deliberately pins none in `[build]`, so a plain `cargo build` stays host-native and the project still builds anywhere.
-Note that build-std rebuilds the Rust sysroot but **not** the musl C runtime: the CRT objects come from the *prebuilt* target, which must therefore be installed on the **nightly** toolchain as well, or linking fails with `cannot find rcrt1.o` / `-lunwind` (`musl-tools` is not what fixes it).
-BUILD.md spells out the `rustup target add` step.
+`build-std` requires an explicit `--target`; `[build]` deliberately pins none, so a plain `cargo build` stays host-native.
+It rebuilds the Rust sysroot but **not** the musl C runtime: those CRT objects come from the prebuilt target, which must therefore be installed on the *nightly* toolchain too, or linking fails with `cannot find rcrt1.o` / `-lunwind` (`musl-tools` is not what fixes it).
 
 ### 11 — `-Cpanic=immediate-abort`
 
@@ -248,16 +258,16 @@ On ELF it needs `lld` — `/OPT:ICF` has no default-linker equivalent, as GNU `b
 
 ### 12 — Raw ANSI output
 
-`ui::render` and the terminal setup in `main.rs` no longer go through crossterm's `SetForegroundColor` / `MoveTo` / `EnterAlternateScreen` / `SetTitle` / `Clear` commands; they write the escape bytes directly.
-Colours are precomputed `&'static [u8]` SGR constants stored in each `Cell`; alt-screen, title, cursor-hide and clear are literal CSI/OSC byte strings, byte-identical to what crossterm emits.
+`ui::render` and the terminal setup in `main.rs` write the escape bytes directly instead of going through crossterm's `SetForegroundColor` / `MoveTo` / `EnterAlternateScreen` / `SetTitle` / `Clear`.
+Colours are precomputed `&'static [u8]` SGR constants stored in each `Cell`; alt-screen, title, cursor-hide and clear are literal CSI/OSC byte strings.
+
 On Windows that reclaims two things:
 
 - the **integer `fmt` machinery** the colour and cursor commands pulled in via `write!` (`Colored::fmt`, `pad_integral`, `fmt::write`) — `render` was the only integer-formatting site;
-- the **WinAPI fallback** of every terminal and cursor command (`SetConsoleTitleW` with its UTF-16 `EncodeUtf16` path, alt-screen/cursor/clear through the console API).
-  Each command compiled *both* an ANSI and a WinAPI path, selected at runtime by `supports_ansi()`, so both were linked.
+- the **WinAPI fallback** of every terminal and cursor command (`SetConsoleTitleW` with its UTF-16 path, alt-screen/cursor/clear through the console API). Each command compiled *both* an ANSI and a WinAPI path, selected at runtime by `supports_ansi()`, so both were linked.
 
-Mouse capture **stays** on crossterm: on Windows `EnableMouseCapture` is WinAPI-only, because the console event source reads mouse input from the input buffer rather than from ANSI reports, so the `?1000h…` sequences would not work.
-Since we no longer call `supports_ansi()` (which enabled VT as a side effect), `init_terminal` sets `ENABLE_VIRTUAL_TERMINAL_PROCESSING` itself, through a three-function `extern "system"` block (`GetStdHandle` / `GetConsoleMode` / `SetConsoleMode`) rather than `crossterm_winapi`'s `Handle` + `ConsoleMode` wrappers: those carry an `Arc` and two `Drop` flavours, and `Handle::current_out_handle()` reaches the console through `CreateFileW("CONOUT$")` with its UTF-16 path. Going direct is **-142 B** and doubles as the startup probe — the standard output handle fails `GetConsoleMode` when stdout is a file or a pipe, and an old console fails `SetConsoleMode`; in both cases no escape we emit would be honoured, so `init_terminal` refuses and `main` exits silently instead of painting the user's terminal with escape bytes.
+Mouse capture **stays** on crossterm: on Windows `EnableMouseCapture` is WinAPI-only, the console event source reading mouse input from the input buffer rather than from ANSI reports.
+And since `supports_ansi()` is no longer called — it enabled VT as a side effect — `init_terminal` sets `ENABLE_VIRTUAL_TERMINAL_PROCESSING` itself through a three-function `extern "system"` block. **−142 B**, and it doubles as the startup probe ([#31](#31--vt-enabling-doubles-as-a-startup-probe)).
 
 Linux is byte-neutral (+15 B): crossterm already emits ANSI there and `supports_ansi` is Windows-only, so there was no second path to reclaim.
 
@@ -265,7 +275,7 @@ Linux is byte-neutral (+15 B): crossterm already emits ANSI there and `supports_
 
 crossterm's `terminal::size()` falls back to spawning `tput` when the `TIOCGWINSZ` ioctl fails, and its Unix event source calls `size()` on every resize, so that fallback is always reachable.
 It anchored `std::process::Command`, a `BTreeMap<OsString, OsString>` environment copy, and their `Debug`/`fmt` subtree.
-A vendored crossterm with an ioctl-only `size()` drops all of it; `nm` confirms `tput_value`, `Command` and `BTreeMap` are gone.
+A vendored crossterm with an ioctl-only `size()` drops all of it.
 Windows is unaffected — its `size()` uses `GetConsoleScreenBufferInfo`.
 
 The copy is wired in by a `[patch.crates-io]` table in `Cargo.toml`, so every build links it.
@@ -368,10 +378,7 @@ See [Panic handling](#panic-handling).
 
 ### 24 — Vendored crossterm: no `io::Error` message payloads
 
-The first find of **linker-map attribution**: building with `-Clink-arg=/MAP:…` is byte-neutral (verified: the two binaries differ only in the 6 timestamp bytes any relink changes) and lists every post-LTO/ICF symbol of the exact shipping binary with its address — sizes fall out of consecutive-address deltas, folded symbols share an address.
-Unlike `cargo bloat` it cannot measure the wrong build, and folds are visible instead of misattributed.
-
-The map showed ~6.6 KB anchored by `io::Error::new(kind, "message")` in crossterm: a `&str` payload monomorphizes `From<&str> for Box<dyn Error>`, and the boxed `StringError`'s `Debug` vtable reaches `str::escape_debug`, whose printable-class/grapheme tables cost ~3.4 KB of `.rdata` alone.
+The linker map showed ~6.6 KB anchored by `io::Error::new(kind, "message")` in crossterm: a `&str` payload monomorphizes `From<&str> for Box<dyn Error>`, and the boxed `StringError`'s `Debug` vtable reaches `str::escape_debug`, whose printable-class/grapheme tables cost ~3.4 KB of `.rdata` alone.
 Four live sites patched (`ErrorKind` alone, no payload — nothing in the app reads error messages); details in [LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md) change 4.
 On Linux the same patch shrinks sections by ~430 B, but `.relro_padding` (page alignment, counted by `size -A`) grows back by almost exactly that: net −1 B across changes 24–27.
 
@@ -411,19 +418,6 @@ The same principle (deliver only presses, left-clicks and resizes) is worth **�
 Full breakdown, including the Unix-only `char::is_uppercase` → `is_ascii_uppercase` fix, in [LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md) change 7.
 
 The subtlety is **framing**, and it has no Windows analogue: the caller feeds bytes one at a time, so a sequence being dropped must still be consumed to its end (`Ok(None)` until a CSI final byte) before it is refused, or its tail resurfaces as ordinary keystrokes — an arrow key would type letters into the board.
-That, and every other behaviour claim above, is checked by driving the built binary through a real PTY (see below) rather than by reading the diff.
-
-**Behaviour is verified against a control binary, not asserted.**
-The parser changes are not covered by `cargo test` — no test drives a terminal — so `tools/pty_test.sh` runs the built binary under a PTY (`script -qec`, 80×30) and asserts on the bytes it renders: typing and submitting a word, an invalid word, backspace, Ctrl+C and Esc quitting, arrows/F-keys leaving the draft untouched, and clicks on the ENTER button and on a letter key in **both** mouse encodings driving the game.
-
-```bash
-bash tools/pty_test.sh target/x86_64-unknown-linux-gnu/release/wordle_tui
-```
-
-Run it against a **control** binary built from the previous commit too — that is what makes the output readable.
-On a first attempt three checks failed on *both* binaries: the pty line discipline was eating CR (`ICRNL`) and `0x03` (`ISIG`) before the app switched to raw mode — an artefact of the harness, not a regression, fixed by delaying the input.
-A patch is a regression only when the two runs differ.
-
 
 ### 31 — VT enabling doubles as a startup probe
 
@@ -440,8 +434,6 @@ Unix has no equivalent probe here; a redirected stdout still runs blind there, s
 The 200 ms poll interval went with it: `run` renders on change and only an event changes anything, so the wakeups did nothing. The loop now blocks, and the process is idle between keystrokes.
 Crossterm's own out-of-line symbols drop from 3,235 B to 59 B; the rest is inlined into `run`.
 
-Reverting `event/read.rs` to the upstream file with change 32 in place leaves the binary byte-identical, so the fork carries no queue patch at all.
-
 
 ### 33 — Windows raw mode is already set by mouse capture
 
@@ -451,7 +443,7 @@ So `enable_raw_mode()`'s write never survived: mouse capture is what puts the co
 
 Both calls are now `#[cfg(unix)]`. Unix raw mode is termios, which the mouse sequences do not touch, so there the pair is load-bearing.
 
-Verified by reading the input mode out of a running instance: `0x98` with and without the calls — `PROCESSED`, `LINE` and `ECHO` all clear.
+The console input mode reads `0x98` with the raw-mode calls and without them: `PROCESSED`, `LINE` and `ECHO` clear either way.
 
 ### 34 — Vendored crossterm: key characters without the keyboard layout
 
@@ -471,39 +463,64 @@ Two sites opened a private handle on the console screen buffer to read its windo
 The app runs in the alternate screen, whose buffer is exactly window-sized, so the y correction is the identity and the parser's call goes entirely; `size()` reads the same rectangle off the standard output handle the process already owns ([LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md) change 11).
 This unlinks `ScreenBuffer`, `Handle::current_out_handle` and their `Arc`/`Drop` glue.
 
-Changes 33–36 were validated against a control binary built without them, driven through a real console (`WriteConsoleInputW` in, `ReadConsoleOutputCharacterW` out): typing, `Enter`, `Backspace`, an inert `Tab`, a click on an on-screen key and `Ctrl+C` give byte-identical screens on both. Linux is untouched by all four — same binary, and `tools/pty_test.sh` passes.
+Linux is untouched by changes 33–36: same binary.
 
 
 ### 37 — `#![no_main]`: the process starts without Rust's runtime
 
-An empty `fn main() {}` on this profile is **19,456 B**. Nothing in it is the program: it is `std::rt`'s entry path, `lang_start`, which wraps the real `main` in `rt::init` and `rt::cleanup` — and on MSVC the C runtime's startup underneath that.
+An empty `fn main() {}` on this profile is **19,456 B**, none of it the program: it is `std::rt`'s entry path, `lang_start`, wrapping the real `main` in `rt::init` and `rt::cleanup` — and on MSVC the C runtime's startup underneath. Nothing this game needs is in there. `rt::init` installs a stack-guard page, records thread identity and, on Linux, stores the `argc`/`argv` behind `env::args`; `rt::cleanup` flushes stdout. There is no recursion and no `thread::spawn` anywhere, no code reads an argument, and `restore_terminal` already flushes.
 
-Neither does anything this game needs. `rt::init` installs a stack-guard page for the main thread, records thread identity, and on Linux stores the `argc`/`argv` that back `env::args`; `rt::cleanup` flushes stdout at exit. There is no recursion in the tree and no `thread::spawn` anywhere, so nothing can overflow the stack or ask for a thread name; no code reads an argument; and `restore_terminal` already flushes.
+`#![no_main]` replaces that entry, at a different depth per platform:
 
-`#![no_main]` replaces that entry, and the two platforms sit at different depths:
+- **Unix** — `main` is `extern "C"`, so glibc's `_start` and `__libc_start_main` still run and call it; only `lang_start` is skipped. **−4,130 B.**
+- **Windows** — `mainCRTStartup` *is* the MSVC CRT's entry, so defining it replaces the CRT startup outright: `__scrt_common_main_seh`, `__isa_available_init`, the security-cookie init and the `onexit` tables all go, and `ExitProcess` becomes ours to call. **−7,528 B.**
 
-- **Unix** — `main` is defined as `extern "C"`, so glibc's `_start` and `__libc_start_main` still run and call it. Only `lang_start` is skipped. **−4,130 B.**
-- **Windows** — `mainCRTStartup` *is* the MSVC CRT's entry, and defining it replaces the CRT startup outright: `__scrt_common_main_seh`, `__isa_available_init`, the security-cookie init and the `onexit` tables all go, and `ExitProcess` becomes ours to call. **−7,528 B**, roughly 6 KB more than the Unix-depth change would have bought here.
+Three consequences on Windows:
 
-The Windows depth has three consequences, all checked rather than assumed:
+- The linker reads the entry point and subsystem off the names `main`/`WinMain`, and neither exists now, so `/ENTRY:mainCRTStartup` and `/SUBSYSTEM:CONSOLE` must be stated, and `/defaultlib:vcruntime` must supply the `memcpy`/`memmove` the CRT startup object would have brought in. `build/main.rs` emits them as `rustc-link-arg-bins`: rustflags would reach every crate built for the triple, and `/ENTRY` breaks the proc-macro DLLs' link. As a build-script directive it also survives an env `RUSTFLAGS` overriding the `[target]` block, so no build command changes.
+- `memcpy` from `vcruntime` dispatches on `__isa_available`, which the CRT startup would have set. Left at 0 it takes the baseline SSE2 path — correct on any x86-64, marginally slower with AVX. Its heaviest user, the corpus decode, is one pass at startup.
+- Bypassing the CRT startup means nothing walks `.CRT`, so the link warns LNK4210 whenever that section exists. It does not: no `thread_local!` reaches the binary ([#39](#39--own-stdout-no-iostdout)), so `tlssup.obj` and its `__xl_a`/`__xl_z` bounds markers are never linked, and there is no C/C++ initializer or TLS callback to miss. Nothing silences the warning — if a `thread_local!` with a destructor comes back, it should fire.
 
-- The linker reads the entry point and the subsystem off the names `main`/`WinMain`, and neither exists now, so `/ENTRY:mainCRTStartup` and `/SUBSYSTEM:CONSOLE` must be stated, and `/defaultlib:vcruntime` must supply the `memcpy`/`memmove` the CRT startup object would have brought in. These are emitted by `build/main.rs` as `rustc-link-arg-bins`, not put in `.cargo/config.toml`: rustflags reach every crate built for the triple and `/ENTRY` breaks the proc-macro DLLs' link. As a build-script directive it also survives an env `RUSTFLAGS` that overrides the `[target]` block, so no build command in BUILD.md changes.
-- `memcpy` from `vcruntime` dispatches on `__isa_available`, which the CRT startup would have set. Left at 0 it takes the baseline SSE2 path — correct on any x86-64, marginally slower on a machine with AVX. The corpus decode, the heaviest user of it, is one pass at startup.
-- The link warns LNK4210, that `.CRT`'s static initializers and terminators may go unrun. Here the section is empty — the map shows only `tlssup.obj`'s bounds markers `__xl_a` and `__xl_z` with no entry between them, so no C/C++ initializer and no TLS callback exists to miss. The warning is suppressed with `/IGNORE:4210` at that one site; the comment there names the condition that would make it real again (a `thread_local!` with a destructor reaching the binary).
-
-`no_main` and both entry points are `cfg(not(test))`: a `cargo test` build of a bin target needs the harness's own `main`, and suppressing it makes the test link fail. The link args stay unconditional — with the CRT startup back in the picture, `/ENTRY:mainCRTStartup` simply names the CRT's own.
-
-Verified on both platforms against a control binary: Windows through the console harness (typing, `Enter`, `Backspace`, an inert `Tab`, a click on an on-screen key, `Ctrl+C`) with byte-identical screens, plus the redirected-stdout and no-console startups still exiting 0 without writing; Linux through `tools/pty_test.sh`, 11/11. Both the stable and ship profiles build on both platforms.
+`no_main` and both entry points are `cfg(not(test))`: a `cargo test` build of a bin target needs the harness's own `main`. The link args stay unconditional — with the CRT startup back in the picture, `/ENTRY:mainCRTStartup` names the CRT's own.
 
 ### 38 — Vendored crossterm: unreferenced code deleted
 
-Not a size change in intent — a readability one. Every earlier vendored-crossterm change left its unused halves in the tree so a re-vendor would stay a small diff, and the crate still carried `cursor`, `style`, `clipboard`, `tty`, the event queue, the async stream and both platforms' wakers, none of which the game calls. All of it is deleted, along with the feature flags that gated it and the eight optional dependencies behind them ([LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md) change 12).
+A readability change more than a size one. Each earlier vendored-crossterm change left its unused halves in the tree, and the crate still carried `cursor`, `style`, `clipboard`, `tty`, the event queue, the async stream and both platforms' wakers — none of it called. All of it goes, with the feature flags that gated it and the eight optional dependencies behind them ([LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md) change 12).
 
-The linker had already dropped every byte of it, so what the figures measure is the behaviour that came off with the code: the mouse modifier bits Windows decoded per click, the key-event kind and state fields, and the deadline arithmetic the Unix source carried into every poll. Windows **−376 B**; Linux ships 704 B fewer (70,808 → 70,088 B on disk) but reads **+16 B** of section total, `.relro_padding` having grown to keep the page alignment — the same accounting as [#32](#32--vendored-crossterm-blocking-event-source-no-queue).
+The linker had already dropped every byte, so the figures measure the behaviour that came off with the code: the mouse modifier bits Windows decoded per click, the key-event kind and state fields, the deadline arithmetic the Unix source carried into every poll.
+Windows **−376 B**; Linux ships 704 B fewer (70,808 → 70,088 B on disk) but reads **+16 B** of section total, `.relro_padding` having grown to keep the page alignment — the same accounting as [#32](#32--vendored-crossterm-blocking-event-source-no-queue).
 
-The cost is the re-vendor: the tree no longer diffs usefully against the tarball, so a crossterm upgrade means rebuilding this subset from the new source rather than re-applying a patch. LOCAL_PATCH.md names every site it needs.
+The cost is the re-vendor: an upgrade now means rebuilding this subset from the new source rather than re-applying a patch.
 
-`tools/pty_test.sh` passes 11/11 and `cargo test` is unchanged; two call sites in `main.rs` follow the narrower event types.
+### 39 — Own stdout, no `io::stdout()`
+
+Three layers, none of them wanted here. On Windows the bottom one decides at *run time* whether to write the bytes as given or convert them to UTF-16 for `WriteConsoleW`, so both halves link whatever the process writes — conversion, UTF-8 validation and `EncodeUtf16` included. Above it sits a `OnceLock<ReentrantLock<RefCell<LineWriter>>>`: a lock with no second thread to exclude, and a 1 KB line buffer that never sees a newline, this renderer stepping down with CSI E.
+
+`src/out.rs` is one 8 KB buffer over the standard handle — the handle `enable_vt` has already probed. `ui::render` is generic over `W: Write` and does not change, and neither do the bytes; only the syscall boundaries move, a whole frame now leaving in a single write.
+
+Windows **−4,316 B**, Linux **−4,124 B**. Windows loses its `.CRT` section with them: it held nothing but `tlssup.obj`'s bounds markers, pulled in by the thread identity behind the stdout lock. With no `thread_local!` left, LNK4210 cannot fire, and the `/IGNORE:4210` that silenced it is deleted — a `.CRT` that comes back is worth reading, not suppressing.
+
+### 40 — Vendored crossterm: console API without `crossterm_winapi`
+
+The last dependency between the game and the Windows console charged for three things it cannot use: a refcounted, self-closing `Handle` with its `Arc` and two `Drop` flavours; `CONIN$` spelled as an `OsStr`, encoded to UTF-16 and collected into a `Vec<u16>`; and an `io::Error::last_os_error()` on every fallible call, which anchors the OS-error `Display` subtree whether or not an error is ever printed.
+
+The four Windows files now declare the console entry points they call and the record shapes they read, and report failure as a bare `ErrorKind`. `winapi` goes with `crossterm_winapi`: it supplied constants and one struct, and the features the vendored crate needed reached it only through that edge. The vendored crossterm has no Windows dependency left ([LOCAL_PATCH.md](vendor/crossterm/LOCAL_PATCH.md) change 13).
+
+**−1,855 B.** The OS-error subtree does not fall here — `std::fs::File`, which the game's own writer still went through, anchors it the same way ([#41](#41--out-writes-through-writefile-not-stdfsfile)).
+
+### 41 — `Out` writes through `WriteFile`, not `std::fs::File`
+
+[#39](#39--own-stdout-no-iostdout) left the buffer emptying into a `ManuallyDrop<File>` on the standard handle — `WriteFile` underneath, and exactly the bytes handed over, but still a `std::fs` call reporting failure through `io::Error::last_os_error()`. After [#40](#40--vendored-crossterm-console-api-without-crossterm_winapi) it was the only caller left in the binary.
+
+`out::write_sink` calls `WriteFile` itself on Windows and answers with a bare `ErrorKind`, taking the whole OS-error `Display` subtree off with it. Unix keeps the `File`: `rustix` and `mio` anchor that machinery there regardless, and `write_all`'s retry on an interrupted write is what the signal-driven resize path wants.
+
+**−5,198 B.** What is left of `.text` is 9.3 KB, of which std contributes 50 B, `core` 141 B and the vendored crossterm 138 B.
+
+### 42 — Vendored crossterm: a resize reports a count, not an index
+
+`WINDOW_BUFFER_SIZE_EVENT` carries a `dwSize` that is already a count of columns and rows. Upstream adds one to each, on the reasoning that "windows starts counting at 0" — true of the `srWindow` rectangle `terminal::size()` reads, not of this field.
+
+The cost is a grid one column and one row larger than the window it was told about: every row runs one glyph past the right margin and wraps, so each takes two lines, the frame overflows and the top of the board scrolls away. Dropping the `+1` puts the event on the same footing as `terminal::size()` and as the Unix side, both of which report counts. **−16 B**, which is not the point.
 
 
 ## Rejected experiments
@@ -533,14 +550,14 @@ Recorded so they are not retried.
   Unwind tables from the *prebuilt* std, dead under `panic=abort` and immediate-abort since nothing unwinds, but this profile links prebuilt std, so no build flag drops them.
   Reclaimable via build-std (`-Cforce-unwind-tables=no`) or a post-link `objcopy --remove-section .eh_frame --remove-section .eh_frame_hdr` (measured on a 118,608 B binary: 118,608 → 99,956, −18,652 B) — the latter leaves a dangling `PT_GNU_EH_FRAME` program header, so validate at runtime before relying on it.
   About half the Windows/Linux gap; most of the rest is the Unix input stack (mio, signal-hook, the signal-driven resize path), which Windows does not have.
-- **Dependency features: nothing left to trim.**
-  crossterm is at its floor ([#3](#3--crossterm-feature-floor)) — `events` is required for input, `windows` for raw mode/console, and crossterm has no `no_std` mode.
-  On Windows, `events` pulls `mio`/`signal-hook`/`signal-hook-mio` only under `cfg(unix)`, so they are not compiled.
-  And cargo *unions* features across the graph, so from our manifest we can only ever *add* a transitive dependency's features, never remove one crossterm's own edge requests — which is why the only lever that works is `[patch]`-ing crossterm itself ([#13](#13--vendored-crossterm-ioctl-only-size), [#15](#15--vendored-crossterm-single-threaded-parking_lot-dropped)).
-- **The OS-error subtree (~3.5 KB `.text`), anchored by `io::Error::last_os_error()` alone.**
-  `core::io::Error` cannot call the OS itself, so `std::io::Error::from_raw_os_error` hands it a `&'static OsFunctions` — three function pointers, `format_os_error`, `decode_error_kind`, `is_interrupted` — which `set_functions` stores in an `AtomicPtr`. Storing their address is what makes all three unremovable, so **one `last_os_error()` anywhere** keeps the errno→`ErrorKind` table (`decode_error_kind`, 640 B) *and* the message formatter (`error_string` → `FormatMessageW`, plus `String`/`alloc::fmt::format` and `<i32 as Display>::fmt` for the `os error N` fallback), even though nothing in this program ever reads an error message.
-  Reading the pointer is free; only creating an OS error anchors it. Two call sites do, and neither is ours: std's `Stdout::write` on every `write_all`, and `crossterm_winapi`'s `result()`/`handle_result()`.
-  Measured with a probe on this profile: `#![no_main]` plus a single `io::stdout().write_all(b"hi")` and no other code pulls the whole cluster. Freeing it means giving up `io::stdout()` *and* `crossterm_winapi` — our own `WriteConsoleW` writer returning `io::Error::from(ErrorKind)`, and direct FFI for the console read. That would also shed std's stdout stack (`LineWriter`, `BufWriter`, `ReentrantLock`, `OnceLock`, the `EncodeUtf16 → Vec<u16>` console conversion), another ~2 KB. Noted, not done.
+- **Dependencies: nothing left to trim.**
+  The vendored crossterm has no feature flags left to turn off and no Windows dependency at all ([#38](#38--vendored-crossterm-unreferenced-code-deleted), [#40](#40--vendored-crossterm-console-api-without-crossterm_winapi)); `bitflags` is the whole Windows list.
+  What remains is the Unix input stack — `mio`, `signal-hook`, `signal-hook-mio`, `rustix` — compiled only under `cfg(unix)`, which is why Windows does not pay for it.
+  Cargo *unions* features across the graph, so a manifest can only ever *add* a transitive dependency's features, never remove one a crate's own edge requests: `[patch]`-ing crossterm is what makes any of this reachable at all ([#13](#13--vendored-crossterm-ioctl-only-size), [#15](#15--vendored-crossterm-single-threaded-parking_lot-dropped)).
+- **The OS-error subtree (~3.5 KB `.text`) — stuck on Linux, gone on Windows.**
+  `core::io::Error` cannot call the OS itself, so `std::io::Error::from_raw_os_error` hands it a `&'static OsFunctions` — three function pointers, `format_os_error`, `decode_error_kind`, `is_interrupted` — which `set_functions` stores in an `AtomicPtr`. Storing their address is what makes all three unremovable, so **one `last_os_error()` anywhere** keeps the errno→`ErrorKind` table *and* the message formatter (`error_string`, plus `String`/`alloc::fmt::format` and `<i32 as Display>::fmt` for the `os error N` fallback), even though nothing in this program ever reads an error message. Reading the pointer is free; only creating an OS error anchors it.
+  On **Windows** every caller was reachable and every one has been taken out — `io::stdout()` ([#39](#39--own-stdout-no-iostdout)), `crossterm_winapi` ([#40](#40--vendored-crossterm-console-api-without-crossterm_winapi)) and `std::fs::File` ([#41](#41--out-writes-through-writefile-not-stdfsfile)) — so the cluster is absent from the binary.
+  On **Linux** it stays: `rustix`, `mio` and `signal-hook` all build OS errors, and on top of it `char::escape_debug_ext` and ~2.8 KB of `core::unicode` tables hang off the `&str` payloads *those* crates pass to `io::Error::new` (the same anchor [#24](#24--vendored-crossterm-no-ioerror-message-payloads) removed inside crossterm). Freeing it there means dropping mio and signal-hook for a bare `poll(2)` + `signalfd`, which is a rewrite of the Unix event source rather than a patch.
 - Everything else in `.text` is either ours (`main`, `ui::build_grid`, `app::submit`, `words::decode_word`) or genuinely-used std and crossterm — on Linux, notably the Unix input stack (`parse_event`, signal-hook, mio).
 
 ## Panic handling

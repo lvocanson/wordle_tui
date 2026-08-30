@@ -1,11 +1,4 @@
-use crossterm_winapi::{ControlKeyState, EventFlags, KeyEventRecord};
-use winapi::um::{
-    wincon::{
-        LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED, RIGHT_ALT_PRESSED, RIGHT_CTRL_PRESSED, SHIFT_PRESSED,
-    },
-    winuser::{VK_BACK, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_RETURN, VK_SHIFT, VK_TAB},
-};
-
+use super::{KeyEventRecord, MouseEventRecord};
 use crate::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 
 // LOCAL PATCH — see …LOCAL_PATCH.md: the event set is reduced to what this app consumes — key
@@ -13,54 +6,77 @@ use crate::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 // mouse events, and resizes. Key releases, alt-codes, surrogate pairs, function/navigation keys,
 // and every other mouse kind (up/drag/move/scroll, right/middle) are not parsed into events.
 
+// Virtual-key codes (winuser.h) and control-key state bits (wincon.h), declared here rather than
+// imported from `winapi`: they are the seven keys and five bits this parser reads.
+const VK_BACK: u16 = 0x08;
+const VK_TAB: u16 = 0x09;
+const VK_RETURN: u16 = 0x0D;
+const VK_SHIFT: u16 = 0x10;
+const VK_CONTROL: u16 = 0x11;
+const VK_MENU: u16 = 0x12;
+const VK_ESCAPE: u16 = 0x1B;
+
+const RIGHT_ALT_PRESSED: u32 = 0x0001;
+const LEFT_ALT_PRESSED: u32 = 0x0002;
+const RIGHT_CTRL_PRESSED: u32 = 0x0004;
+const LEFT_CTRL_PRESSED: u32 = 0x0008;
+const SHIFT_PRESSED: u32 = 0x0010;
+
+/// `MOUSE_EVENT_RECORD::dwButtonState`, leftmost button.
+const FROM_LEFT_1ST_BUTTON_PRESSED: u32 = 0x0001;
+
+/// `MOUSE_EVENT_RECORD::dwEventFlags`. A plain press or release reports none of them; a
+/// double-click reports `DOUBLE_CLICK`. Motion and the two wheel axes are the flags this app
+/// refuses.
+const MOUSE_PRESS_OR_RELEASE: u32 = 0x0000;
+const DOUBLE_CLICK: u32 = 0x0002;
+
 #[derive(Default)]
 pub struct MouseButtonsPressed {
     pub(crate) left: bool,
 }
 
+pub(crate) fn left_button(button_state: u32) -> bool {
+    button_state & FROM_LEFT_1ST_BUTTON_PRESSED != 0
+}
+
 pub(crate) fn handle_mouse_event(
-    mouse_event: crossterm_winapi::MouseEvent,
+    mouse_event: &MouseEventRecord,
     buttons_pressed: &MouseButtonsPressed,
 ) -> Option<Event> {
-    parse_mouse_event_record(&mouse_event, buttons_pressed).map(Event::Mouse)
+    parse_mouse_event_record(mouse_event, buttons_pressed).map(Event::Mouse)
 }
 
-pub(crate) fn handle_key_event(key_event: KeyEventRecord) -> Option<Event> {
-    parse_key_event_record(&key_event).map(Event::Key)
+pub(crate) fn handle_key_event(key_event: &KeyEventRecord) -> Option<Event> {
+    parse_key_event_record(key_event).map(Event::Key)
 }
 
-impl From<&ControlKeyState> for KeyModifiers {
-    fn from(state: &ControlKeyState) -> Self {
-        let shift = state.has_state(SHIFT_PRESSED);
-        let alt = state.has_state(LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED);
-        let control = state.has_state(LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
+fn modifiers(control_key_state: u32) -> KeyModifiers {
+    let mut modifiers = KeyModifiers::empty();
 
-        let mut modifier = KeyModifiers::empty();
-
-        if shift {
-            modifier |= KeyModifiers::SHIFT;
-        }
-        if control {
-            modifier |= KeyModifiers::CONTROL;
-        }
-        if alt {
-            modifier |= KeyModifiers::ALT;
-        }
-
-        modifier
+    if control_key_state & SHIFT_PRESSED != 0 {
+        modifiers |= KeyModifiers::SHIFT;
     }
+    if control_key_state & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED) != 0 {
+        modifiers |= KeyModifiers::CONTROL;
+    }
+    if control_key_state & (LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED) != 0 {
+        modifiers |= KeyModifiers::ALT;
+    }
+
+    modifiers
 }
 
 fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<KeyEvent> {
     // LOCAL PATCH — see …LOCAL_PATCH.md: presses only. Upstream keeps releases for the Alt-code
     // exception (an Alt release carrying a u_char); with Alt-code input dropped, releases carry
     // nothing this app reads.
-    if !key_event.key_down {
+    if key_event.key_down == 0 {
         return None;
     }
-    let modifiers = KeyModifiers::from(&key_event.control_key_state);
+    let modifiers = modifiers(key_event.control_key_state);
 
-    let parse_result = match key_event.virtual_key_code as i32 {
+    let parse_result = match key_event.virtual_key_code {
         VK_SHIFT | VK_CONTROL | VK_MENU => None,
         VK_BACK => Some(KeyCode::Backspace),
         VK_ESCAPE => Some(KeyCode::Esc),
@@ -76,7 +92,7 @@ fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<KeyEvent> {
                 // 256-byte key-state buffer and a UTF-16 decode) to also resolve dead keys and
                 // non-Latin control combinations, neither of which this app reads.
                 // VK_TAB is the one key in this range that is not a Ctrl combination.
-                0x01..=0x1a if key_event.virtual_key_code as i32 != VK_TAB => {
+                0x01..=0x1a if key_event.virtual_key_code != VK_TAB => {
                     Some(KeyCode::Char((b'a' + utf16 as u8 - 1) as char))
                 }
                 // Function and navigation keys arrive here with u_char == 0, dead keys likewise:
@@ -95,18 +111,17 @@ fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<KeyEvent> {
 }
 
 fn parse_mouse_event_record(
-    event: &crossterm_winapi::MouseEvent,
+    event: &MouseEventRecord,
     buttons_pressed: &MouseButtonsPressed,
 ) -> Option<MouseEvent> {
     // LOCAL PATCH — see …LOCAL_PATCH.md: only a fresh left-button press becomes an event; the
     // upstream arms for releases, right/middle buttons, motion/drag and both scroll axes are
     // gone, and so are the modifier bits the game never reads.
-    match event.event_flags {
-        EventFlags::PressOrRelease | EventFlags::DoubleClick => {}
-        _ => return None,
+    if event.event_flags != MOUSE_PRESS_OR_RELEASE && event.event_flags != DOUBLE_CLICK {
+        return None;
     }
 
-    if !event.button_state.left_button() || buttons_pressed.left {
+    if !left_button(event.button_state) || buttons_pressed.left {
         return None;
     }
 

@@ -132,12 +132,12 @@ fn emit_entry_point_link_args() {
         println!("cargo:rustc-link-arg-bins=/ENTRY:mainCRTStartup");
         println!("cargo:rustc-link-arg-bins=/SUBSYSTEM:CONSOLE");
         println!("cargo:rustc-link-arg-bins=/defaultlib:vcruntime");
-        // LNK4210 warns that `.CRT` exists and its static initializers/terminators may go unrun,
-        // because bypassing the CRT startup means nothing walks that section. Here it is empty:
-        // the linker map shows `.CRT` holding only `__xl_a` and `__xl_z`, `tlssup.obj`'s bounds
-        // markers, with no entry between them — no C/C++ initializer (`.CRT$XI*`/`XC*`) and no
-        // TLS callback (`.CRT$XL[B-Y]`). Re-check that if a `thread_local!` with a destructor
-        // ever reaches the binary: that registers a real callback, which would then never run.
-        println!("cargo:rustc-link-arg-bins=/IGNORE:4210");
+        // Nothing silences LNK4210 (`.CRT` present, its initializers possibly unrun, because
+        // bypassing the CRT startup means nothing walks that section): the binary has no `.CRT`
+        // at all. No `thread_local!` reaches it, so `tlssup.obj` and its `__xl_a`/`__xl_z` bounds
+        // markers are never linked, and there is no C/C++ initializer (`.CRT$XI*`/`XC*`) or TLS
+        // callback (`.CRT$XL[B-Y]`) to miss. A `thread_local!` with a destructor is the likely
+        // door back in; it registers a real callback that would then never run, and the warning
+        // that says so is worth reading rather than suppressing.
     }
 }

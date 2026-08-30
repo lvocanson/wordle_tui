@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/lvocanson/wordle_tui/actions/workflows/ci.yml/badge.svg)](https://github.com/lvocanson/wordle_tui/actions/workflows/ci.yml)
 
-Wordle in the terminal: full-screen board, on-screen keyboard, mouse or keyboard input, and a 14,853-word dictionary — in a **40 KB** binary built on one dependency (`crossterm`) with no runtime files.
+Wordle in the terminal: full-screen board, on-screen keyboard, mouse or keyboard input, and a 14,853-word dictionary — in a **28 KB** binary built on one dependency (`crossterm`) with no runtime files.
 
 <p align="center">
   <img src="docs/demo.gif" width="400"
@@ -11,7 +11,7 @@ Wordle in the terminal: full-screen board, on-screen keyboard, mouse or keyboard
 
 ```bash
 cargo run --release      # no prerequisites, 136 KB
-./wtui-ship.sh run       # everything on, 40 KB — toolchain and flags handled for you
+./wtui-ship.sh run       # everything on, 28 KB — toolchain and flags handled for you
 ```
 
 Rust stable builds and runs with no prerequisites.
@@ -97,8 +97,8 @@ Size is the project's main constraint; the whole record lives in [OPTIMIZATION.m
 | Profile | Windows | Linux (glibc) |
 |---------|--------:|--------------:|
 | First working TUI (baseline) | 396,288 | — |
-| Stable, no prerequisites | 135,680 | 331,888 |
-| `ship`, pinned nightly | **39,936** | 70,088 |
+| Stable, no prerequisites | 124,416 | 329,872 |
+| `ship`, pinned nightly | **28,672** | 67,848 |
 
 Bytes on disk — the size a release asset shows. OPTIMIZATION.md compares un-padded section totals instead, which differ from these by the linker's section padding (and, on musl, by zero-initialized data).
 

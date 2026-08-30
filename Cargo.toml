@@ -2,7 +2,7 @@
 name = "wordle_tui"
 version = "1.1.0"
 edition = "2021"
-description = "Wordle in the terminal, in a 40 KB binary, no runtime files"
+description = "Wordle in the terminal, in a 28 KB binary, no runtime files"
 repository = "https://github.com/lvocanson/wordle_tui"
 license = "MIT"
 build = "build/main.rs"
